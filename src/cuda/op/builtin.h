@@ -26,9 +26,6 @@ static constexpr const char *kCustomWarpSpecialization =
 static constexpr const char *kTmaDescriptorBaseIsDeviceBound =
     "tma_descriptor_base_is_device_bound";
 
-// Minimum CUDA thread blocks per SM for __launch_bounds__ emission.
-static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
-
 } // namespace attr
 
 // PrimFunc attribute set when CUDA TMA operations are generated.

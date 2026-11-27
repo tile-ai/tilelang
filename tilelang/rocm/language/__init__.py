@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
+from tilelang.language.annotations import annotate_min_blocks_per_sm  # noqa: F401
 
 from .intrinsics import *  # noqa: F401,F403
 from .intrinsics import __all__ as _ROCM_ALL
@@ -16,6 +17,6 @@ from .gemm_op import *  # noqa: F401,F403
 from .gemm_op import __all__ as _GEMM_ALL
 
 __tilelang_dialect__ = "rocm"
-__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ROCM_ALL, *_KERNEL_ALL, *_GEMM_ALL)))
+__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ROCM_ALL, *_KERNEL_ALL, *_GEMM_ALL, "annotate_min_blocks_per_sm")))
 
 del _COMMON_ALL, _ROCM_ALL, _KERNEL_ALL, _GEMM_ALL
