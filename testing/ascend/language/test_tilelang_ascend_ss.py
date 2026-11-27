@@ -224,3 +224,14 @@ def test_ss_publication_and_slot_reuse(mode):
         actual = kernel(*args)
         torch.npu.synchronize()
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+def test_annotate_unlimit_memory_accepts_shared_ss():
+    """`shared.ss` is the scope the scheduler suggests, so the dialect must accept it."""
+
+    @T.prim_func
+    def main(A: T.Tensor((64, 64), "float16")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64, 64), "float16")
+            T.annotate_unlimit_memory("shared.ss")
+            T.copy(A, ub)
