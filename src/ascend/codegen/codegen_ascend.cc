@@ -1714,19 +1714,22 @@ void CodeGenTileLangAscend::EmitMad_(const CallNode *op, bool is_mx) {
 
 void CodeGenTileLangAscend::EmitGemmL1_(const CallNode *op) {
   constexpr const char *kIntrinsic = "tl.ascend_gemm_l1";
-  ICHECK_EQ(op->args.size(), 12)
-      << kIntrinsic << " expects exactly 12 arguments";
+  ICHECK_EQ(op->args.size(), 14)
+      << kIntrinsic << " expects exactly 14 arguments";
   const int64_t m = GetIntImmArg(op, 3, kIntrinsic, "M");
   const int64_t k = GetIntImmArg(op, 4, kIntrinsic, "K");
   const int64_t n = GetIntImmArg(op, 5, kIntrinsic, "N");
   const int64_t tile_k_sub = GetIntImmArg(op, 6, kIntrinsic, "tile_k_sub");
   const bool transpose_b = GetIntImmArg(op, 7, kIntrinsic, "transpose_b") != 0;
   const std::string dtype = GetStringImmArg(op, 9, kIntrinsic, "dtype");
+  const int64_t a_l1_rows = GetIntImmArg(op, 12, kIntrinsic, "a_l1_rows");
+  const int64_t b_l1_rows = GetIntImmArg(op, 13, kIntrinsic, "b_l1_rows");
 
   std::ostringstream function_name;
   function_name << "ascend_gemm_l1<" << m << ", " << k << ", " << n << ", "
                 << tile_k_sub << ", " << (transpose_b ? "true" : "false")
-                << ", " << dtype << ">";
+                << ", " << dtype << ", " << a_l1_rows << ", " << b_l1_rows
+                << ">";
   EmitCApiCall_(function_name.str(), {{op->args[0]},
                                       {op->args[1]},
                                       {op->args[2]},

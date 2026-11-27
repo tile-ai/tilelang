@@ -3791,8 +3791,8 @@ CodeGenTileLangPTO::FindVmiAllocArray_(const BufferNode *buffer,
 
 const CodeGenTileLangPTO::PTOGemmEmitContext &
 CodeGenTileLangPTO::EnsureGemmHelper(const CallNode *op) {
-  ICHECK_EQ(op->args.size(), 12U)
-      << "tl.ascend_gemm_l1 expects exactly 12 arguments";
+  ICHECK_EQ(op->args.size(), 14U)
+      << "tl.ascend_gemm_l1 expects exactly 14 arguments";
   int64_t tile_m = ConstArgDim(op, 3, "tl.ascend_gemm_l1 M");
   int64_t tile_k = ConstArgDim(op, 4, "tl.ascend_gemm_l1 K");
   int64_t tile_n = ConstArgDim(op, 5, "tl.ascend_gemm_l1 N");
