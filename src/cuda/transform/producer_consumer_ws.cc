@@ -32,6 +32,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
+#include <unordered_set>
 #include <utility>
 
 #include "backend/common/target_utils.h"
@@ -2114,12 +2115,76 @@ private:
       ICHECK(branch_ptr->else_case.defined());
       branch_ptr->else_case =
           AppendToStmt(branch_ptr->else_case.value(), consumer_postlude);
-      if (container.same_as(branch)) {
+      if (!container->IsInstance<AttrStmtNode>()) {
         return branch;
       }
       AttrStmt attr = Downcast<AttrStmt>(container);
       attr.CopyOnWrite()->body = branch;
       return attr;
+    }
+
+    // Buffers `stmt` may write: stored to, written by a tile op, or passed by
+    // pointer.
+    static VarSet PossiblyWrittenBuffers(const Stmt &stmt) {
+      VarSet written;
+      PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          written.insert(store->buffer->data);
+        } else if (const auto *call = obj.as<CallNode>()) {
+          if (auto tile_op = ParseOperator(GetRef<Call>(call));
+              tile_op.defined()) {
+            // Tile ops (e.g. a TMA copy) name their destination as a region.
+            for (const BufferRegion &region :
+                 tile_op->GetAccessRegions().writes) {
+              written.insert(region->buffer->data);
+            }
+          } else if (call->op.same_as(builtin::tvm_access_ptr()) &&
+                     call->args.size() > 1) {
+            if (const auto *data = call->args[1].as<VarNode>()) {
+              written.insert(GetRef<Var>(data));
+            }
+          } else if ((call->op.same_as(tl::access_ptr()) ||
+                      call->op.same_as(builtin::address_of())) &&
+                     !call->args.empty()) {
+            if (const auto *base = call->args[0].as<BufferLoadNode>()) {
+              written.insert(base->buffer->data);
+            }
+          }
+        }
+      });
+      return written;
+    }
+
+    // `if (cond) { <WS branch> }` with a side-effect-free `cond` that neither
+    // depends on the thread index nor reads memory the branch writes. Every
+    // thread evaluates `cond` once, to the same value, whether it is tested
+    // around the WS branch or at the start of the partition it runs, so the
+    // `if` can be moved into both partitions.
+    bool IsWSBranchUnderIf(const Stmt &stmt, PrimExpr *cond, Stmt *container,
+                           IfThenElse *branch) const {
+      const auto *if_node = stmt.as<IfThenElseNode>();
+      if (!if_node || if_node->else_case.defined() ||
+          SideEffect(if_node->condition) > CallEffectKind::kReadState ||
+          UsesVar(if_node->condition, [this](const VarNode *var) {
+            return var == thread_var_.get();
+          })) {
+        return false;
+      }
+      if (!IsWSBranch(if_node->then_case, container, branch)) {
+        return false;
+      }
+      VarSet written = PossiblyWrittenBuffers(if_node->then_case);
+      bool reads_written = false;
+      PostOrderVisit(if_node->condition, [&](const ObjectRef &obj) {
+        if (const auto *load = obj.as<BufferLoadNode>()) {
+          reads_written = reads_written || written.count(load->buffer->data);
+        }
+      });
+      if (reads_written) {
+        return false;
+      }
+      *cond = if_node->condition;
+      return true;
     }
 
     Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -2132,7 +2197,10 @@ private:
       for (int i = 0; i < static_cast<int>(visited.size()); ++i) {
         Stmt ws_container;
         IfThenElse ws_branch;
-        if (!IsWSBranch(visited[i], &ws_container, &ws_branch)) {
+        PrimExpr outer_cond;
+        if (!IsWSBranch(visited[i], &ws_container, &ws_branch) &&
+            !IsWSBranchUnderIf(visited[i], &outer_cond, &ws_container,
+                               &ws_branch)) {
           rebuilt.push_back(visited[i]);
           continue;
         }
@@ -2149,6 +2217,16 @@ private:
         if (consumer_postlude.empty()) {
           rebuilt.push_back(visited[i]);
           continue;
+        }
+        if (outer_cond.defined()) {
+          // Split the partitions outside the `if` so that the postlude joins
+          // the consumer partition: code after a join of the two partitions
+          // would run under neither partition's register budget.
+          ws_branch =
+              IfThenElse(ws_branch->condition,
+                         IfThenElse(outer_cond, ws_branch->then_case),
+                         IfThenElse(outer_cond, ws_branch->else_case.value()),
+                         ws_branch->span);
         }
 
         rebuilt.push_back(UpdateWSBranchContainer(ws_container, ws_branch,
