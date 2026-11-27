@@ -3,7 +3,8 @@
 A persistent KV stream spans query jobs. Q and the online state live until
 the query's last KV tile; output chunks own their Fixpipe/Vector handoff.
 Q uses two explicit query slots when its periodic ownership fits the event
-budget; all per-tile buffer versions are compiler-managed.
+budget; all per-tile buffer versions are annotated by hand via
+`T.annotate_buffer_versions` / `T.annotate_manual_multi_buffer`.
 """
 
 import tilelang.ascend.language as T

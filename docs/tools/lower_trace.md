@@ -10,9 +10,9 @@ is enough.
 IR Lower Trace is the recommended successor to {doc}`pass_diff`. Compared with
 the older `TILELANG_PASS_DIFF` tool, it adds:
 
-- **Phase context** — each pass is tagged with its pipeline phase (e.g.
-  `pipeline_c`, `phase1_...`), so you can tell which backend stage a pass
-  belongs to.
+- **Phase context** — each pass is tagged with its pipeline phase (named
+  `pipeline_<target kind>`, e.g. `pipeline_cuda`, `pipeline_ascend`), so you
+  can tell which backend stage a pass belongs to.
 - **Codegen capture** — the final TIR-to-source lowering is recorded, and the
   generated C/CUDA/HIP code is dropped to disk for inspection or editing.
 - **Edit-and-recompile workflow** — edit the generated codegen source on disk
@@ -83,12 +83,12 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
     └── .run_records/
         └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>_<unique-id>/
             ├── report.html             # this run's full report
-            ├── pipeline_c/             # one subdir per phase (example)
+            ├── pipeline_cuda/          # one subdir per phase (example)
             │   ├── 00_BindTarget_before.tir
             │   ├── 00_BindTarget_after.tir
             │   ├── 01_Simplify_before.tir
             │   └── 01_Simplify_after.tir
-            ├── phase2_optimize/        # another phase (illustrative)
+            ├── pipeline_ascend/        # another phase (illustrative)
             │   └── ...
             ├── codegen/
             │   ├── 42_codegen_device_before.tir
@@ -357,7 +357,7 @@ IR Lower Trace uses three cooperating layers:
    are tagged with the `unscoped` phase.
 2. **Explicit `PassPipeline.lower` scope** — contributes a context-local phase
    to the caller-owned session so passes in a backend pipeline are grouped
-   under labels such as `pipeline_c`. The pipeline does not create or finalize
+   under labels such as `pipeline_cuda`. The pipeline does not create or finalize
    the compile session. This is a normal pipeline boundary, not a class
    monkey-patch.
 3. **Explicit backend codegen hook** — TileLang's device/host codegen registry
