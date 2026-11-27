@@ -193,10 +193,15 @@ def _require_integer_vector(value, *, context: str):
 
 def _require_compatible_mask(mask, lanes: int, *, context: str):
     mask = _require_mask(mask, context=context)
-    if not str(_dtype_of(mask)).startswith("bool"):
-        raise TypeError(f"{context} expects a VMI mask operand")
-    if _lanes_of(mask) != lanes:
-        raise TypeError(f"{context} requires mask and vector lane counts to match")
+    try:
+        mask_dtype = _dtype_of(mask)
+        mask_lanes = int(getattr(mask_dtype, "lanes", 1))
+    except Exception as err:  # pylint: disable=broad-except
+        # An operand that cannot even be converted to a TIR expression is not a
+        # predicate; report the call site instead of the conversion failure.
+        raise TypeError(f"{context}: mask must be a predicate with {lanes} lanes, got {mask!r}") from err
+    if not str(mask_dtype).startswith("bool") or mask_lanes != lanes:
+        raise TypeError(f"{context}: mask must be a predicate with {lanes} lanes, got {mask_dtype}")
     return mask
 
 
@@ -817,10 +822,11 @@ def _binary_same_dtype(name):
 def _unary_same_dtype(name):
     @_scope_guarded
     def wrapper(source, mask=None, *, pmode=None, loc=None, ip=None):
-        _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
+        context = f"T.vmi.{name}(...)"
+        _reject_packed_fp4(source, context=context)
         args = [source]
         if mask is not None:
-            args.append(mask)
+            args.append(_require_compatible_mask(mask, _lanes_of(source), context=context))
         return _call_vmi(name, _dtype_of(source), *args, pmode=pmode, loc=loc, ip=ip)
 
     return wrapper
@@ -829,13 +835,14 @@ def _unary_same_dtype(name):
 def _vec_scalar_same_dtype(name):
     @_scope_guarded
     def wrapper(source, scalar, mask, *, pmode=None, loc=None, ip=None):
-        _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
+        context = f"T.vmi.{name}(...)"
+        _reject_packed_fp4(source, context=context)
         return _call_vmi(
             name,
             _dtype_of(source),
             source,
             scalar,
-            _require_mask(mask, context=f"T.vmi.{name}(...)"),
+            _require_compatible_mask(mask, _lanes_of(source), context=context),
             pmode=pmode,
             loc=loc,
             ip=ip,
@@ -1147,28 +1154,34 @@ def vinterpret_cast(source, to_dtype=None, *, loc=None, ip=None):
 
 @_scope_guarded
 def vexpdif(x, max_value, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, max_value, context="T.vmi.vexpdif(...)")
-    return _call_vmi(
-        "vexpdif", _dtype_of(max_value), x, max_value, _require_mask(mask, context="T.vmi.vexpdif(...)"), pmode=pmode, loc=loc, ip=ip
-    )
+    context = "T.vmi.vexpdif(...)"
+    _reject_packed_fp4(x, max_value, context=context)
+    mask = _require_compatible_mask(mask, _lanes_of(x), context=context)
+    return _call_vmi("vexpdif", _dtype_of(max_value), x, max_value, mask, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
 def vaxpy(x, acc, alpha, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, acc, context="T.vmi.vaxpy(...)")
-    return _call_vmi("vaxpy", _dtype_of(acc), x, acc, alpha, _require_mask(mask, context="T.vmi.vaxpy(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vaxpy(...)"
+    _reject_packed_fp4(x, acc, context=context)
+    mask = _require_compatible_mask(mask, _lanes_of(acc), context=context)
+    return _call_vmi("vaxpy", _dtype_of(acc), x, acc, alpha, mask, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
 def vlrelu(x, slope, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, context="T.vmi.vlrelu(...)")
-    return _call_vmi("vlrelu", _dtype_of(x), x, slope, _require_mask(mask, context="T.vmi.vlrelu(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vlrelu(...)"
+    _reject_packed_fp4(x, context=context)
+    mask = _require_compatible_mask(mask, _lanes_of(x), context=context)
+    return _call_vmi("vlrelu", _dtype_of(x), x, slope, mask, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
 def vprelu(x, alpha, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, context="T.vmi.vprelu(...)")
-    return _call_vmi("vprelu", _dtype_of(x), x, alpha, _require_mask(mask, context="T.vmi.vprelu(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vprelu(...)"
+    _reject_packed_fp4(x, context=context)
+    mask = _require_compatible_mask(mask, _lanes_of(x), context=context)
+    return _call_vmi("vprelu", _dtype_of(x), x, alpha, mask, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
@@ -1185,8 +1198,10 @@ def vmull(a, b, mask, *, pmode=None, loc=None, ip=None):
 
 @_scope_guarded
 def vmula(acc, lhs, rhs, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(acc, lhs, rhs, context="T.vmi.vmula(...)")
-    return _call_vmi("vmula", _dtype_of(acc), acc, lhs, rhs, _require_mask(mask, context="T.vmi.vmula(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vmula(...)"
+    _reject_packed_fp4(acc, lhs, rhs, context=context)
+    mask = _require_compatible_mask(mask, _lanes_of(acc), context=context)
+    return _call_vmi("vmula", _dtype_of(acc), acc, lhs, rhs, mask, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
