@@ -155,6 +155,3 @@ def test_runtime_offset_window_is_written_per_lane(k):
         # diagnostics for the widest window.
         assert got[32] == np.float32(a[0]), "a passing lane must write its own slot"
         assert got[33] == SENTINEL, "a failing lane must leave its slot untouched"
-
-
-

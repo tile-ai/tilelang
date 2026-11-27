@@ -52,8 +52,8 @@ class LoadCollector : public tirx::StmtExprVisitor {
 public:
   struct Location {
     // A handle, not a borrowed node pointer: the ordering analysis keeps these
-    // locations while it rewrites the tree, so their lifetime must not depend on
-    // the input tree staying alive and unmodified.
+    // locations while it rewrites the tree, so their lifetime must not depend
+    // on the input tree staying alive and unmodified.
     Buffer buffer;
     Array<PrimExpr> indices;
   };
@@ -171,7 +171,8 @@ public:
   }
 
   // Deliberately unused now that admission runs through the shared scan; kept
-  // out to avoid a second, divergent definition of "this region has a unit".  // Clears an access predicate that provably holds. Verify admitted the field
+  // out to avoid a second, divergent definition of "this region has a unit". //
+  // Clears an access predicate that provably holds. Verify admitted the field
   // only when it is provably true, so anything else here means the two passes
   // disagree; that is reported instead of ignored, because dropping a
   // conditional access makes it unconditional. The judgment is the same helper
@@ -217,8 +218,23 @@ public:
       Stmt VisitStmt_(const AttrStmtNode *op) final {
         Map<Var, PrimExpr> saved;
         EnterScope(&saved);
+        // `node` is an expression position too: a UB load there carries an
+        // access predicate Verify admitted, so the same clearing has to reach
+        // it. Non-expression metadata (a Buffer, a Var) is left untouched.
+        PrimExpr node_expr;
+        if (op->node.as<PrimExprNode>()) {
+          node_expr = Downcast<PrimExpr>(op->node);
+        }
+        const PrimExpr rewritten_node =
+            node_expr.defined() ? VisitExpr(node_expr) : PrimExpr();
         Stmt result = StmtExprMutator::VisitStmt_(op);
         LeaveScope(&saved);
+        if (rewritten_node.defined() && !rewritten_node.same_as(node_expr)) {
+          AttrStmt attr = Downcast<AttrStmt>(result);
+          AttrStmtNode *node = attr.CopyOnWrite();
+          node->node = rewritten_node;
+          return attr;
+        }
         return result;
       }
       // The realize header (condition and iteration values) is evaluated in the
@@ -362,10 +378,18 @@ public:
         divisor = &div->b;
       } else if (const auto *mod = node.as<ModNode>()) {
         divisor = &mod->b;
+      } else if (const auto *fdiv = node.as<FloorDivNode>()) {
+        // Address arithmetic admits floordiv/floormod, so they are just as
+        // eager as div/mod once the guard is folded away.
+        divisor = &fdiv->b;
+      } else if (const auto *fmod = node.as<FloorModNode>()) {
+        divisor = &fmod->b;
       }
-      if (divisor != nullptr &&
-          !predicate_analyzer_.CanProve(*divisor !=
-                                        IntImm(divisor->dtype(), 0))) {
+      if (divisor != nullptr && !predicate_analyzer_.CanProve(
+                                    *divisor != make_zero(divisor->dtype()))) {
+        // A zero literal must carry the divisor's own dtype: IntImm rejects a
+        // floating-point dtype, and a float division is just as unsafe when the
+        // divisor may be zero.
         safe = false;
       }
     });
@@ -374,94 +398,72 @@ public:
 
   // A guard may be the only reason an access stays inside its buffer (a guard
   // such as `i < 64` covering the first chunk of a two-chunk unit). The fold
-  // emits the store for every iteration, so an index range that can exceed the
-  // buffer makes the rewrite illegal. Only a *provable* overflow rejects the
-  // fold: a runtime offset remains the program's own contract, which is what
-  // the runtime-offset fold relies on.
-  bool DestinationMayLeaveBounds(const Stmt &arm) {
+  // evaluates both arms, and the synthesized store, for every iteration, so an
+  // access that leaves its buffer for the iterations where the guard is false
+  // makes the rewrite illegal -- reads included: `if i < 64: y[i] = a[i] else:
+  // y[i] = 0` reads `a[64..127]` after the fold even though those lanes select
+  // the constant.
+  bool AccessMayLeaveBounds(const Stmt &arm) {
     bool leaves = false;
     PostOrderVisit(arm, [&](const ObjectRef &node) {
       if (leaves) {
         return;
       }
       if (const auto *store = node.as<BufferStoreNode>()) {
-        leaves = IndexRangeOutsideBuffer(store->buffer, store->indices);
+        leaves = IndicesMayLeaveBuffer(store->buffer, store->indices);
+      } else if (const auto *load = node.as<BufferLoadNode>()) {
+        leaves = IndicesMayLeaveBuffer(load->buffer, load->indices);
       }
     });
     return leaves;
   }
 
-  bool IndexRangeOutsideBuffer(const Buffer &buffer,
-                               const Array<PrimExpr> &indices) {
+  // Judged per logical axis against the view shape. A physical-offset check
+  // against the product of the shape is wrong twice over: a strided view
+  // (`shape (2, 64)`, `strides (128, 1)`) legitimately stores at offsets
+  // 128..191 inside a 192-element allocation, and a physical range does not say
+  // which logical index left the view.
+  bool IndicesMayLeaveBuffer(const Buffer &buffer,
+                             const Array<PrimExpr> &indices) {
     if (indices.size() != buffer->shape.size()) {
       return false;
     }
-    int64_t extent = 1;
-    for (const PrimExpr &dim : buffer->shape) {
-      const auto *imm = dim.as<IntImmNode>();
-      if (imm == nullptr || extent > (int64_t{1} << 40)) {
-        return false; // dynamic shape: keep the program's contract
+    // A bound wider than the int32 coordinate range cannot come from a loop
+    // coordinate: it comes from an unconstrained runtime symbol (or from an
+    // overflowed bound computation). Such an axis follows the program's own
+    // contract -- pinning the symbol would test one address, not the ones it
+    // can take -- so it is skipped and the remaining axes are still judged.
+    const int64_t kRuntimeBound = int64_t{1} << 31;
+    for (size_t axis = 0; axis < indices.size(); ++axis) {
+      const auto *dim = buffer->shape[axis].as<IntImmNode>();
+      if (dim == nullptr) {
+        // A dynamic extent on this axis says nothing about the others: keep
+        // scanning so a static axis can still prove an overflow.
+        continue;
       }
-      extent *= imm->value;
-    }
-    const Array<PrimExpr> offsets = buffer->ElemOffset(indices);
-    if (offsets.size() != 1) {
-      return false; // multi-axis physical layout: keep the contract
-    }
-    // A runtime symbol driving the offset is the program's contract. Pin every
-    // symbol whose range is int32-wide to zero, so its range cannot masquerade
-    // as a provable overflow: only the loop coordinates (tight ranges) may
-    // prove that the store leaves the buffer.
-    PrimExpr offset = offsets[0];
-    Map<Var, PrimExpr> pinned;
-    const int64_t kRuntimeBound = int64_t{1} << 20;
-    PostOrderVisit(offset, [&](const ObjectRef &node) {
-      const auto *var = node.as<VarNode>();
-      if (var == nullptr) {
-        return;
+      const arith::ConstIntBound bound =
+          predicate_analyzer_.const_int_bound(indices[axis]);
+      if (bound->min_value <= -kRuntimeBound ||
+          bound->max_value >= kRuntimeBound) {
+        continue; // runtime-driven axis: the program's contract
       }
-      const arith::ConstIntBound var_bound =
-          predicate_analyzer_.const_int_bound(GetRef<Var>(var));
-      if (var_bound->min_value <= -kRuntimeBound ||
-          var_bound->max_value >= kRuntimeBound) {
-        pinned.Set(GetRef<Var>(var), IntImm(var->dtype, 0));
+      if (bound->min_value < 0 || bound->max_value >= dim->value) {
+        out_of_bounds_detail_ =
+            DescribeOutOfBounds(buffer, axis, dim->value, bound);
+        return true;
       }
-    });
-    if (!pinned.empty()) {
-      offset = Substitute(offset, pinned);
-    }
-    const arith::ConstIntBound bound =
-        predicate_analyzer_.const_int_bound(offset);
-    // An unbounded or absurd bound means a runtime value drives the address (an
-    // int32 bound computation can also overflow into a finite value), which
-    // stays the program's own contract; only a sane, fully known range can
-    // prove an overflow.
-    const int64_t kBoundSanityLimit = int64_t{1} << 40;
-    if (bound->min_value == arith::ConstIntBound::kNegInf ||
-        bound->max_value == arith::ConstIntBound::kPosInf ||
-        bound->min_value <= -kBoundSanityLimit ||
-        bound->max_value >= kBoundSanityLimit) {
-      return false;
-    }
-    if (bound->min_value < 0) {
-      out_of_bounds_detail_ =
-          "buffer `" + std::string(buffer->name) + "` extent " +
-          std::to_string(extent) + ", index range [" +
-          std::to_string(bound->min_value) + ", " +
-          std::to_string(bound->max_value) + "]";
-      return true;
-    }
-    if (bound->max_value >= extent) {
-      out_of_bounds_detail_ =
-          "buffer `" + std::string(buffer->name) + "` extent " +
-          std::to_string(extent) + ", index range [" +
-          std::to_string(bound->min_value) + ", " +
-          std::to_string(bound->max_value) + "]";
-      return true;
     }
     return false;
   }
 
+  std::string DescribeOutOfBounds(const Buffer &buffer, size_t axis,
+                                  int64_t extent,
+                                  const arith::ConstIntBound &bound) {
+    return "buffer `" + std::string(buffer->name) + "` axis " +
+           std::to_string(axis) + " extent " + std::to_string(extent) +
+           ", index range [" + std::to_string(bound->min_value) + ", " +
+           std::to_string(bound->max_value) + "]";
+  }
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     if (!in_parallel_) {
       return StmtExprMutator::VisitStmt_(op);
@@ -482,14 +484,13 @@ public:
            "unconditionally, so keep the branch or make the divisor provably "
            "nonzero");
     }
-    // The same applies to memory: a guard is allowed to be the only thing
-    // keeping an access in bounds, and the fold drops it.
-    if (DestinationMayLeaveBounds(then_case) ||
-        (else_case.defined() &&
-         DestinationMayLeaveBounds(else_case.value()))) {
-      Fail("a guarded write's destination can fall outside the buffer for "
-           "iterations where the guard is false; folding would read back and "
-           "write that address unconditionally (" +
+    // The same applies to memory, reads and writes alike: a guard is allowed to
+    // be the only thing keeping an access in bounds, and the fold drops it.
+    if (AccessMayLeaveBounds(then_case) ||
+        (else_case.defined() && AccessMayLeaveBounds(else_case.value()))) {
+      Fail("a guarded access can leave its buffer for iterations where the "
+           "guard is false; folding would evaluate that read or write "
+           "unconditionally (" +
            out_of_bounds_detail_ + ")");
     }
     // The condition travels into the value choices, so it needs the same
@@ -513,8 +514,13 @@ public:
   // Min/Max stay nodes when the direct VMI instruction is usable: integers
   // always (integer comparison has no NaN or signed-zero ambiguity), floating
   // point only under `tl.pto.relaxed_minmax`, whose default accepts the
-  // instruction's NaN and signed-zero semantics.
+  // instruction's NaN and signed-zero semantics. The instruction covers only
+  // 8/16/32-bit integers and f16/bf16/f32, so FP8 and wider floats keep the
+  // comparison plus Select form.
   bool KeepMinMaxNode(const DataType &dtype) const {
+    if (!pto::IsSupportedVectorBinaryOp("vmin", dtype)) {
+      return false;
+    }
     return dtype.is_int() || dtype.is_uint() || relaxed_minmax_;
   }
 
@@ -718,8 +724,7 @@ public:
                 });
               }
               if (seq[i].store != nullptr && seq[j].store != nullptr &&
-                  MayConflict(seq[i].store->buffer,
-                              seq[j].store->buffer)) {
+                  MayConflict(seq[i].store->buffer, seq[j].store->buffer)) {
                 dep = true; // WAW
               }
               if (seq[i].store != nullptr) {
@@ -990,8 +995,8 @@ public:
   bool in_simd_vf_ = false;
   bool in_parallel_ = false;
   int condition_serial_ = 0;
-  // Exact alignment search guard rails (see AlignArmDestinations): the search is
-  // exponential, so it is capped and falls back to the identity order.
+  // Exact alignment search guard rails (see AlignArmDestinations): the search
+  // is exponential, so it is capped and falls back to the identity order.
   static constexpr int64_t kAlignmentSearchBudget = 200000;
   static constexpr int kUnreachableSteps = 1 << 20;
   std::string out_of_bounds_detail_;
@@ -1045,7 +1050,9 @@ tvm::transform::Pass LegalizeParallelToPTO() {
     // Floating-point Min/Max may use the direct VMI instruction unless the
     // caller opts into the NaN- and signed-zero-preserving Select lowering.
     const bool relaxed_minmax =
-        ctx->GetConfig<Bool>("tl.pto.relaxed_minmax", Bool(true)).value()->value;
+        ctx->GetConfig<Bool>("tl.pto.relaxed_minmax", Bool(true))
+            .value()
+            ->value;
     return LowerControlFlow(std::move(f), relaxed_minmax);
   };
   return tvm::tirx::transform::CreatePrimFuncPass(

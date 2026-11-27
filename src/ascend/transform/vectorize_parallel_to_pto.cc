@@ -48,9 +48,9 @@
 #include <map>
 #include <set>
 #include <sstream>
-#include <utility>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "parallel_to_pto_utils.h"
@@ -166,6 +166,10 @@ private:
         "tl.vmi.vand",
         "tl.vmi.vor",
         "tl.vmi.vnot",
+        "tl.vmi.vmin",
+        "tl.vmi.vmax",
+        "tl.vmi.vmins",
+        "tl.vmi.vmaxs",
         "tl.access_ptr",
     };
     bool discardable = true;
@@ -856,8 +860,8 @@ private:
     if (const auto *div = expr.as<DivNode>()) {
       return ConvertBinary(div->a, div->b, "vdiv", pre);
     }
-    // Min/Max survive Legalize when the direct instruction is usable: always for
-    // integers, and for floating point under tl.pto.relaxed_minmax.
+    // Min/Max survive Legalize when the direct instruction is usable: always
+    // for integers, and for floating point under tl.pto.relaxed_minmax.
     if (const auto *minn = expr.as<MinNode>()) {
       return ConvertMinMax(minn->a, minn->b, /*is_min=*/true, pre);
     }
@@ -1250,8 +1254,8 @@ private:
       std::swap(a, b);
     }
     const bool scalar_rhs = b.dtype().lanes() == 1;
-    const std::string op =
-        is_min ? (scalar_rhs ? "vmins" : "vmin") : (scalar_rhs ? "vmaxs" : "vmax");
+    const std::string op = is_min ? (scalar_rhs ? "vmins" : "vmin")
+                                  : (scalar_rhs ? "vmaxs" : "vmax");
     return EmitBind(op,
                     Call(VectorDType(a.dtype().element_of(), lanes_), VmiOp(op),
                          {a, b, mask_var_}),

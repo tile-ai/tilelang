@@ -38,6 +38,11 @@ from tilelang.ascend.target import normalize_pto_target
 from tilelang.engine.lower import lower as _lower
 import tvm
 
+# A module-level dynamic extent: `from __future__ import annotations` turns the
+# prim_func annotations into strings, which are evaluated against the module
+# globals, so a builder-local variable would not be visible there.
+_DYNAMIC_K = T.dynamic("K")
+
 
 @contextmanager
 def _stage_capture():
@@ -322,6 +327,26 @@ def _expr_load_rows(expr, buffer):
     return found
 
 
+def _expr_load_index_exprs(expr, buffer):
+    """Index expressions of the loads from `buffer` inside an expression."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name == buffer:
+            found.append(node.indices[0] if node.indices else None)
+
+    tvm.tirx.stmt_functor.post_order_visit(expr, visit)
+    return found
+
+
+def _select_arm_values(store):
+    """The then and else values of a folded store."""
+    value = store.value
+    if isinstance(value, tvm.tirx.Select):
+        return value.true_value, value.false_value
+    return value, value
+
+
 def _assert_war_keeps_the_entry_value(stores, buffer="y"):
     """The arm-local read of a row must be planned before the write that
     overwrites that row with the clobbering literal.
@@ -344,11 +369,7 @@ def _assert_war_keeps_the_entry_value(stores, buffer="y"):
     # The read under test lives in the *then* arm of the nonzero-row store: an
     # else-arm load, or a self-copy that reads the destination's own row, is a
     # different access and must not satisfy this assertion.
-    read_back = [
-        i
-        for i, st in enumerate(stores)
-        if row_of(st) not in (0, None) and 0 in _expr_load_rows(_select_then_value(st), buffer)
-    ]
+    read_back = [i for i, st in enumerate(stores) if row_of(st) not in (0, None) and 0 in _expr_load_rows(_select_then_value(st), buffer)]
     clobber = [i for i, st in enumerate(stores) if row_of(st) == 0 and 1.0 in _store_literals(st)]
     assert read_back, f"the then arm never reads {buffer}[0], so the WAR case is not exercised"
     assert clobber, f"no store overwrites {buffer}[0] with the clobbering literal"
@@ -400,8 +421,34 @@ def test_conditional_arm_that_reads_its_own_write_keeps_arm_order():
     # order still respects the dependency.
     assert len(stores) >= 2, f"expected at least one store per destination, got {len(stores)}"
     assert all(st.predicate is None for st in stores), "no store may stay predicated"
+
+    def row_of(store):
+        index = store.indices[0] if store.indices else None
+        return int(index) if isinstance(index, tvm.tirx.IntImm) else None
+
     order = [int(str(st.indices[0])) for st in stores]
-    assert order.index(1) > order.index(0), f"the destinations must keep their own order, got row indices {order}"
+
+    def arm_rows(store, then_arm):
+        then_value, else_value = _select_arm_values(store)
+        return set(_expr_load_rows(then_value if then_arm else else_value, "y"))
+
+    # Each arm has its own producer/consumer pair, so the order must be checked
+    # per arm: the then arm writes y[0] and then reads it for y[1], the else arm
+    # writes y[1] and then reads it for y[0]. A plan that emitted then-row0,
+    # else-row0, then-row1, else-row1 would satisfy "first row 0 before first
+    # row 1" while the else arm consumes y[1] before producing it.
+    then_consumer = [i for i, st in enumerate(stores) if row_of(st) == 1 and 0 in arm_rows(st, True)]
+    then_producer = [i for i, st in enumerate(stores) if row_of(st) == 0 and not arm_rows(st, True)]
+    else_consumer = [i for i, st in enumerate(stores) if row_of(st) == 0 and 1 in arm_rows(st, False)]
+    else_producer = [i for i, st in enumerate(stores) if row_of(st) == 1 and not arm_rows(st, False)]
+    assert then_producer and then_consumer, f"the then arm's write-then-read pair is missing, rows {order}"
+    assert else_producer and else_consumer, f"the else arm's write-then-read pair is missing, rows {order}"
+    assert min(then_producer) < min(then_consumer), (
+        f"the then arm must write y[0] before it reads y[0], rows {order} (producer {then_producer}, consumer {then_consumer})"
+    )
+    assert min(else_producer) < min(else_consumer), (
+        f"the else arm must write y[1] before it reads y[1], rows {order} (producer {else_producer}, consumer {else_consumer})"
+    )
     assert len(_selects(legalized)) >= 2, "every store needs its own value choice"
 
 
@@ -422,9 +469,7 @@ def test_relaxed_minmax_uses_the_direct_instruction():
         f"both the Max and the Min must use the direct instruction, got {names}"
     )
     assert "tl.vmi.vsel" not in names, f"no value choice is needed, got {names}"
-    assert "tl.vmi.vcmp" not in names and "tl.vmi.vcmps" not in names, (
-        f"no comparison is needed, got {names}"
-    )
+    assert "tl.vmi.vcmp" not in names and "tl.vmi.vcmps" not in names, f"no comparison is needed, got {names}"
 
 
 @pytest.mark.pto
@@ -444,9 +489,9 @@ def test_strict_minmax_keeps_the_select_lowering():
 
     names = _vmi_call_names(stages["vectorize"])
     assert "tl.vmi.vsel" in names, f"the strict form must lower to vsel, got {names}"
-    assert "tl.vmi.vmin" not in names and "tl.vmi.vmax" not in names, (
-        f"the strict form must not use the direct instruction, got {names}"
-    )
+    assert "tl.vmi.vmin" not in names and "tl.vmi.vmax" not in names, f"the strict form must not use the direct instruction, got {names}"
+
+
 def _k_minmax_int(E=256, lanes=64):
     """Integer Min/Max: the direct instruction is exact, so the node stays."""
 
@@ -514,6 +559,144 @@ def _k_minmax_vector_scalar(E=256, lanes=64, scalar_first=False):
     return main
 
 
+def _k_minmax_fp8(E=256, lanes=64, dtype="float8_e4m3fn"):
+    """FP8 Min/Max: the direct instruction has no FP8 form."""
+
+    P = (E + lanes - 1) // lanes * lanes
+
+    @T.prim_func
+    def main(A: T.Tensor((P,), dtype), B: T.Tensor((P,), dtype), C: T.Tensor((P,), dtype)):
+        with T.Kernel(1):
+            a = T.alloc_shared((P,), dtype)
+            b = T.alloc_shared((P,), dtype)
+            c = T.alloc_shared((P,), dtype)
+            T.copy(A, a)
+            T.copy(B, b)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    c[i] = T.min(a[i], b[i])
+            T.copy(c, C)
+
+    return main
+
+
+def _k_dynamic_leading_axis(E=128, lanes=64, inner=64):
+    """A dynamic leading extent must not hide the static inner extent."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((_DYNAMIC_K, inner), "float32"),
+        Y: T.Tensor((E,), "float32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((_DYNAMIC_K, inner), "float32")
+            y = T.alloc_shared((E,), "float32")
+            T.copy(A, a)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if i < inner - 1:
+                        y[i] = a[0, i + 1]
+                    else:
+                        y[i] = T.float32(0.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_dynamic_leading_axis_does_not_hide_the_static_inner_axis():
+    """The dynamic axis 0 is skipped, but axis 1 (`i + 1` against 64) still
+    proves the fold would read out of bounds for the lanes the guard blocks."""
+    _, error = _lower_capture(_k_dynamic_leading_axis(), expect_error=True)
+    assert error is not None, "the widening of a[lane] over the inner axis must be rejected"
+    message = str(error)
+    assert "axis 1" in message and "extent 64" in message, f"expected the axis-1 overflow, got: {message}"
+
+
+def _k_shifted_runtime_window(E=128, lanes=64, width=128):
+    """`y[i + 8*K - 8]` with a runtime K: K=1 keeps every lane in bounds."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E,), "float32"),
+        K: T.int32,
+        Y: T.Tensor((width,), "float32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((width,), "float32")
+            T.copy(A, a)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if a[i] > T.float32(0.0):
+                        y[i + 8 * K - 8] = a[i]
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_shifted_runtime_window_still_folds():
+    """Pinning the runtime symbol to zero would see `i - 8` and reject a
+    destination that the program's contract keeps in bounds."""
+    stages, error = _lower_capture(_k_shifted_runtime_window())
+    assert error is None, f"a runtime-shifted window must not be rejected, got: {error}"
+    assert not _if_then_elses(stages["legalize"]), "the branch must be folded"
+
+
+def _k_floor_div_in_a_guarded_arm(E=128, lanes=64):
+    """A floor division by a runtime divisor inside a guarded *index*.
+
+    A store value is whitelisted before Legalize (which rejects FloorDiv there),
+    so the indexed form is the one that reaches the eager-safety check.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E, E), "float32"),
+        Y: T.Tensor((E,), "float32"),
+        k: T.int32,
+        p: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E, E), "float32")
+            y = T.alloc_shared((E,), "float32")
+            T.copy(A, a)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if p != 0:
+                        y[i] = a[k // p, i]
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_floor_division_in_a_guarded_arm_is_rejected():
+    """`k // p` is as eager as `k / p` once the guard is folded away, so the
+    divisor must be provably nonzero."""
+    _, error = _lower_capture(_k_floor_div_in_a_guarded_arm(), expect_error=True)
+    assert error is not None, "the fold must be rejected"
+    message = str(error)
+    assert "not provably nonzero" in message, f"expected the eager-safety diagnostic, got: {message}"
+
+
+@pytest.mark.pto
+@pytest.mark.parametrize("relaxed", [True, False])
+def test_fp8_minmax_is_rejected_in_both_configurations(relaxed):
+    """FP8 has neither a direct Min/Max instruction nor a vcmp/vsel form, so
+    neither setting can lower it: Verify rejects it with the same dtype
+    diagnostic, and the config cannot be used as an escape hatch."""
+    _, error = _lower_capture(
+        _k_minmax_fp8(),
+        expect_error=True,
+        pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
+    )
+    assert error is not None, "FP8 Min/Max must be rejected"
+    message = str(error)
+    assert "has no PTO Parallel lowering" in message, f"expected the dtype gate, got: {message}"
+
+
 @pytest.mark.pto
 @pytest.mark.parametrize("scalar_first", [False, True])
 def test_vector_scalar_minmax_uses_the_scalar_instruction(scalar_first):
@@ -525,9 +708,7 @@ def test_vector_scalar_minmax_uses_the_scalar_instruction(scalar_first):
     names = _vmi_call_names(stages["vectorize"])
     assert names.get("tl.vmi.vmaxs", 0) == 1, f"expected one vmaxs, got {names}"
     assert "tl.vmi.vmax" not in names, f"the vector form must not be used, got {names}"
-    assert "tl.vmi.vbrc" not in names, (
-        f"the scalar form needs no broadcast, got {names}"
-    )
+    assert "tl.vmi.vbrc" not in names, f"the scalar form needs no broadcast, got {names}"
 
 
 def _k_uniform_minmax_scalar(E=256, lanes=64):
@@ -572,9 +753,7 @@ def test_uniform_minmax_stays_scalar_in_the_unit():
     # that combination point (one vbrc for the scalar addend); the Select
     # itself survives as a scalar TIR node.
     assert names.get("tl.vmi.vbrc", 0) == 1, f"only the add's scalar operand should be broadcast, got {names}"
-    assert names.get("tl.vmi.vmin", 0) == 0 and names.get("tl.vmi.vmins", 0) == 0, (
-        f"a fully lane-uniform Min must stay scalar, got {names}"
-    )
+    assert names.get("tl.vmi.vmin", 0) == 0 and names.get("tl.vmi.vmins", 0) == 0, f"a fully lane-uniform Min must stay scalar, got {names}"
     assert _max_min_nodes(stages["vectorize"]), "the scalar Min node must survive"
 
 
@@ -629,6 +808,21 @@ def test_conditional_load_pre_evaluates_under_the_caller_contract():
 
     loads = _collect(legalized, lambda n: isinstance(n, tvm.tirx.BufferLoad))
     assert loads, "the guarded load must survive (pre-evaluated arm), not be dropped"
+
+    # The shifted read must stay in the true arm: replacing `a[i + 1]` with
+    # `a[i]` would also leave a load behind, and the false arm already reads
+    # `a[i]`, so only the indices tell the two plans apart.
+    select_stores = [st for st in _stores(legalized) if isinstance(st.value, tvm.tirx.Select)]
+    assert select_stores, "the guarded load must sit inside a value choice"
+    then_indices = _expr_load_index_exprs(select_stores[0].value.true_value, "a")
+    else_indices = _expr_load_index_exprs(select_stores[0].value.false_value, "a")
+    assert len(then_indices) == 1, f"the true arm must read `a` once, got {then_indices}"
+    assert len(else_indices) == 1, f"the false arm must read `a` once, got {else_indices}"
+    else_index = else_indices[0]
+    assert isinstance(else_index, tvm.tirx.Var), f"the false arm must read `a[i]`, got {else_index}"
+    assert tvm.ir.structural_equal(then_indices[0], else_index + 1), (
+        f"the true arm must keep reading `a[i + 1]`, got {then_indices[0]} against `a[i]` = {else_index}"
+    )
 
 
 @pytest.mark.pto

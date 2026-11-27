@@ -815,6 +815,24 @@ private:
     // Inner sub-expressions are classified individually, so an int8
     // scalar Mul inside a Varying Add is legal while an int8 vector Mul
     // stays rejected.
+    // Min/Max dtype gate. Both lowerings need a vector instruction of the same
+    // element set: the direct one (vmin/vmax/vmins/vmaxs) or the comparison
+    // plus select one (vcmp/vcmps + vsel). FP8 and wider floats have neither,
+    // so the rejection does not depend on `tl.pto.relaxed_minmax` -- switching
+    // it off cannot rescue such a kernel.
+    void CheckMinMaxDType(const DataType &dtype, const char *name) {
+      if (pto_analysis::IsSupportedVectorBinaryOp("vmin", dtype)) {
+        return;
+      }
+      std::ostringstream oss;
+      oss << name << " on " << dtype
+          << " has no PTO Parallel lowering: neither the direct Min/Max "
+             "instruction nor the comparison plus select form accepts it. The "
+             "supported element types are 8/16/32-bit integers and "
+             "f16/bf16/f32.";
+      parent_->Fail("dtype", oss.str());
+    }
+
     void CheckBinaryOpTypes(const PrimExpr &expr) {
       std::function<void(const PrimExpr &)> check =
           [&](const PrimExpr &e) {
@@ -874,6 +892,7 @@ private:
                 LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
                               "operands has no lane-mask lowering";
               }
+              CheckMinMaxDType(minn->dtype, "Min");
               check(minn->a);
               check(minn->b);
               return;
@@ -885,6 +904,7 @@ private:
                 LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
                               "operands has no lane-mask lowering";
               }
+              CheckMinMaxDType(maxn->dtype, "Max");
               check(maxn->a);
               check(maxn->b);
               return;
@@ -1555,6 +1575,12 @@ private:
         std::set<const VarNode *> saved_defs;
         Map<Var, PrimExpr> saved_env;
         EnterScope(&saved_defs, &saved_env);
+        // `node` is an expression position too (RegionVisitor checks buffer
+        // scopes through it): a UB load there carries an access predicate, and
+        // the base traversal visits only `value` and `body`.
+        if (op->node.as<PrimExprNode>()) {
+          VisitExpr(Downcast<PrimExpr>(op->node));
+        }
         StmtExprVisitor::VisitStmt_(op);
         LeaveScope(&saved_defs, &saved_env);
       }

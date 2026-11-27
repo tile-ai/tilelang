@@ -1312,6 +1312,13 @@ bool IsSupportedVectorBinaryOp(const std::string &vmi_op, DataType dtype) {
   if (vmi_op == "vdiv") {
     return dtype.is_float() && (bits == 16 || bits == 32);
   }
+  if (vmi_op == "vmin" || vmi_op == "vmax") {
+    // The direct Min/Max instruction covers 8/16/32-bit integers and
+    // f16/bf16/f32; FP8 and 64-bit formats have no lowering, so those keep the
+    // comparison plus Select form.
+    return (is_int_like && (bits == 8 || bits == 16 || bits == 32)) ||
+           is_fp_like;
+  }
   return false;
 }
 

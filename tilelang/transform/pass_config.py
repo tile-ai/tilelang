@@ -76,14 +76,20 @@ class PassConfigKey(str, Enum):
       not NaN and may ignore signed-zero differences, so a floating-point
       ``T.min``/``T.max`` lowers to the direct VMI instruction
       (``vmin``/``vmax``, or ``vmins``/``vmaxs`` against a lane-uniform scalar).
-    - False: keeps the ordered comparison plus ``Select`` lowering, which
-      preserves NaN propagation and the sign of zero and costs one compare
-      plus one select.
+    - False: keeps the ordered comparison plus ``Select`` lowering, where an
+      unordered comparison (a NaN operand) or an equal-zero comparison selects
+      the right operand, at the cost of one compare plus one select.
 
     Integer ``Min``/``Max`` always use the direct instruction: integer
     comparison has no NaN or signed-zero ambiguity. Under the relaxed form,
-    ``min/max(NaN, 1)`` yields NaN instead of 1, ``min(-0, +0)`` yields -0
+    ``min/max(NaN, 1)`` yields NaN instead of 1 (the ``Select`` form returns the
+    right operand when the comparison is unordered), ``min(-0, +0)`` yields -0
     instead of +0, and ``max(+0, -0)`` yields +0 instead of -0.
+
+    FP8 is outside the supported set: neither the direct instruction nor the
+    compare plus select form accepts it, so ``Min``/``Max`` on ``float8_e4m3fn``
+    or ``float8_e5m2`` is rejected during verification whatever this option is
+    set to.
     """
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: True
