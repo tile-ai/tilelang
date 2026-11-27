@@ -1925,8 +1925,12 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else {
       this->stream << "asc_enable_hf32();\n";
       this->PrintIndent();
+      // mode 1 is "nearest_zero" (tilelang/ascend/language/mode.py:46), which
+      // is what the PTO backend selects for the same integer
+      // (codegen_pto.cc:986, :998-999). Mapping it onto NEAREST_AWAY changed
+      // the rounding of every fp32 GEMM input without telling the caller.
       this->stream << "asc_set_hf32_round_mode("
-                   << (mode == 1 ? "asc_hf32_round_mode::NEAREST_AWAY"
+                   << (mode == 1 ? "asc_hf32_round_mode::NEAREST_ZERO"
                                  : "asc_hf32_round_mode::NEAREST_EVEN")
                    << ");\n";
     }
