@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common.h"
+#include "mma_block_scale.h"
 #include <cute/arch/mma_sm75.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
@@ -155,6 +156,48 @@ struct SM75_8x8x16_S32U8U8S32_TN {
   }
 };
 
+#if defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)
+// SM120 issues an FP8 mma.sync with fp32 accumulation at half the rate of the
+// block-scaled MXF8F6F4 MMA. With unit ue8m0 scale factors (0x7f encodes 2^0),
+// the block-scaled MMA computes the same result, so FP8 MMAs that accumulate
+// in fp32 use it on SM120 and SM121.
+#define TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA(Name, PtxAType, PtxBType)           \
+  struct Name {                                                                \
+    using DRegisters = float[4];                                               \
+    using ARegisters = uint32_t[4];                                            \
+    using BRegisters = uint32_t[2];                                            \
+    using CRegisters = float[4];                                               \
+                                                                               \
+    CUTE_HOST_DEVICE static void                                               \
+    fma(float &d0, float &d1, float &d2, float &d3, uint32_t const &a0,        \
+        uint32_t const &a1, uint32_t const &a2, uint32_t const &a3,            \
+        uint32_t const &b0, uint32_t const &b1, float const &c0,               \
+        float const &c1, float const &c2, float const &c3) {                   \
+      constexpr uint32_t kUnitScales = 0x7f7f7f7fu;                            \
+      constexpr uint16_t kScaleSelector = 0;                                   \
+      asm("mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X."         \
+          "m16n8k32.row.col.f32." PtxAType "." PtxBType ".f32.ue8m0 "          \
+          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "                     \
+          "{%10, %11, %12, %13}, {%14}, {%15, %16}, {%17}, {%18, %19};\n"      \
+          : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)                             \
+          : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(c0),     \
+            "f"(c1), "f"(c2), "f"(c3), "r"(kUnitScales), "h"(kScaleSelector),  \
+            "h"(kScaleSelector), "r"(kUnitScales), "h"(kScaleSelector),        \
+            "h"(kScaleSelector));                                              \
+    }                                                                          \
+  };
+
+TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA(SM120_16x8x32_F32E4M3E4M3F32_TN, "e4m3",
+                                   "e4m3")
+TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA(SM120_16x8x32_F32E4M3E5M2F32_TN, "e4m3",
+                                   "e5m2")
+TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA(SM120_16x8x32_F32E5M2E4M3F32_TN, "e5m2",
+                                   "e4m3")
+TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA(SM120_16x8x32_F32E5M2E5M2F32_TN, "e5m2",
+                                   "e5m2")
+#undef TL_DEFINE_SM120_FP8_UNIT_SCALE_MMA
+#endif
+
 template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB, bool Saturate>
 struct MmaDispatcher {
@@ -236,20 +279,31 @@ TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 64, false, true, false,
 // FP8 inputs (k32)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F16E4M3E4M3F16_TN)
-TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
-                         true, false, cute::SM89_16x8x32_F32E4M3E4M3F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e5m2, kFloat16, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F16E4M3E5M2F16_TN)
-TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
-                         true, false, cute::SM89_16x8x32_F32E4M3E5M2F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e4m3, kFloat16, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F16E5M2E4M3F16_TN)
-TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
-                         true, false, cute::SM89_16x8x32_F32E5M2E4M3F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat16, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F16E5M2E5M2F16_TN)
+#if defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
+                         true, false, SM120_16x8x32_F32E4M3E4M3F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
+                         true, false, SM120_16x8x32_F32E4M3E5M2F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
+                         true, false, SM120_16x8x32_F32E5M2E4M3F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
+                         true, false, SM120_16x8x32_F32E5M2E5M2F32_TN)
+#else
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
+                         true, false, cute::SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
+                         true, false, cute::SM89_16x8x32_F32E4M3E5M2F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 16, 8, 32, false,
+                         true, false, cute::SM89_16x8x32_F32E5M2E4M3F32_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 16, 8, 32, false,
                          true, false, cute::SM89_16x8x32_F32E5M2E5M2F32_TN)
+#endif
 
 // TF32 inputs (FP32 math on Tensor Cores)
 // Support both k=4 and k=8 variants on SM80
