@@ -26,8 +26,8 @@ the older `TILELANG_PASS_DIFF` tool, it adds:
 - **Crash-safe incremental HTML** — the report is flushed after every pass, so
   partial results survive even if the process crashes.
 - **Enhanced HTML report** — sidebar pass navigation, status dots, phase tabs,
-  `j`/`k` keyboard navigation, `Shift+E` global expand, `F7` manual alignment,
-  dark/light theme.
+  `j`/`k` keyboard navigation, `Shift+E` to show all context,
+  `F7` manual alignment, dark/light theme.
 
 ## Observe the Lowering Pipeline
 
@@ -233,7 +233,7 @@ The HTML report is a single self-contained file (no external assets) providing:
   highlighting, and collapsible context (`↑↓ Expand` buttons reveal hidden equal
   lines).
 - **Keyboard navigation** — `j`/`k` to move between passes, `Shift+E` to
-  expand/collapse all, `F7` for Beyond-Compare-style manual alignment.
+  show all context, `F7` for Beyond-Compare-style manual alignment.
 - **Dark/Light theme toggle** persisted via `localStorage`.
 - **Copy buttons** for before/after IR of any pass.
 - **Error boxes** — a failed pass shows its exception message alongside the IR
