@@ -3414,9 +3414,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
   DataType alloc_dtype = op->buffer->dtype;
   std::string vid = AllocVarID(op->buffer->data.get());
-  PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer->data);
   alloc_storage_scope_[op->buffer->data.get()] = scope;
+  if (scope != "local.var") {
+    PrintIndent();
+  }
 
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
@@ -3475,7 +3477,10 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
         }
         init = user_init;
       }
-      stream << vid << " = " << PrintExpr_(init) << "\n";
+      // Printing the initializer can emit complete statements.
+      std::string init_value = PrintExpr_(init);
+      PrintIndent();
+      stream << vid << " = " << init_value << "\n";
     } else {
       ICHECK(false) << "Unsupported scope: " << scope;
     }
@@ -3542,6 +3547,44 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
   } else {
     CodeGenTileLangPY::VisitStmt_(op);
   }
+}
+
+void CodeGenTileLangCuTeDSL::VisitStmt_(const WhileNode *op) {
+  // Capture statements emitted by the condition at the loop body's indent.
+  std::ostringstream condition_stream;
+  int condition_scope = BeginScope();
+  stream.swap(condition_stream);
+  std::string cond = RemoveOutermostParentheses(PrintExpr_(op->condition));
+  stream.swap(condition_stream);
+  EndScope(condition_scope);
+  std::string condition_statements = condition_stream.str();
+
+  if (condition_statements.empty()) {
+    PrintIndent();
+    stream << "while " << cond << ":\n";
+    int while_scope = BeginScope();
+    PrintStmt_(op->body);
+    EndScope(while_scope);
+    return;
+  }
+
+  // Evaluate the condition at the start of each iteration. A loop-carried
+  // flag exits after a failed check without requiring a dynamic break.
+  std::string active = name_supply_->FreshName("_while_active");
+  PrintIndent();
+  stream << active << " = cutlass.Boolean(True)\n";
+  PrintIndent();
+  stream << "while " << active << ":\n";
+  int while_scope = BeginScope();
+  stream << condition_statements;
+  PrintIndent();
+  stream << active << " = cutlass.Boolean(" << cond << ")\n";
+  PrintIndent();
+  stream << "if " << active << ":\n";
+  int body_scope = BeginScope();
+  PrintStmt_(op->body);
+  EndScope(body_scope);
+  EndScope(while_scope);
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
