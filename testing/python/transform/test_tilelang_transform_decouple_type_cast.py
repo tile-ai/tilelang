@@ -947,5 +947,57 @@ def test_nested_guard_preserves_conditional_evaluation():
     assert int(condition.args[2]) == 0
 
 
+def test_memory_to_local_with_if_then_else_load_guard():
+    """Guarded memory loads keep their T.if_then_else guard in the staging copy loop
+    and drop the redundant zero-padded T.if_then_else around the cast in compute."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn], n: T.int32):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            a_frag[i] = T.if_then_else(i < n, T.cast(b[i], T.float32), T.float32(0))
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn], n: T.int32):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i_copy in T.vectorized(16):
+                b_local_cast[i_copy] = T.if_then_else(i_copy < n, b[i_copy], T.float8_e4m3fn(0))
+            for i in T.vectorized(16):
+                a_frag[i] = T.cast(b_local_cast[i], T.float32)
+
+    _check(before, after)
+
+
+def test_memory_to_local_with_if_then_else_nonzero_else_keeps_compute_select():
+    """When the else branch is non-zero, the staging load is still guarded with zero
+    padding while the compute loop retains the T.if_then_else for the non-zero fallback."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn], n: T.int32):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            a_frag[i] = T.if_then_else(i < n, T.cast(b[i], T.float32), T.float32(1))
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn], n: T.int32):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i_copy in T.vectorized(16):
+                b_local_cast[i_copy] = T.if_then_else(i_copy < n, b[i_copy], T.float8_e4m3fn(0))
+            for i in T.vectorized(16):
+                a_frag[i] = T.if_then_else(i < n, T.cast(b_local_cast[i], T.float32), T.float32(1))
+
+    _check(before, after)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
