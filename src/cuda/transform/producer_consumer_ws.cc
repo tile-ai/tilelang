@@ -46,6 +46,7 @@
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
+#include "transform/common/pipeline_utils.h"
 #include "ws_analysis.h"
 
 namespace tvm {
@@ -1256,6 +1257,12 @@ private:
         CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
     // arrive_counts are computed later (after producer_extent is finalized).
 
+    std::vector<Array<BufferRegion>> completed_reads;
+    if (!CollectAsyncGemmCompletionReads(consumer_compute_stmts,
+                                         &completed_reads)) {
+      return StmtExprMutator::VisitStmt_(orig_realize);
+    }
+
     std::vector<int> wait_insert_pos(num_producer_groups, 0);
     std::vector<int> arrive_insert_pos(
         num_producer_groups, static_cast<int>(consumer_compute_stmts.size()));
@@ -1276,7 +1283,12 @@ private:
           if (access.read && first_read < 0) {
             first_read = static_cast<int>(ci);
           }
-          if (access.HasAnyAccess()) {
+          bool completed_read = std::any_of(
+              completed_reads[ci].begin(), completed_reads[ci].end(),
+              [&](const BufferRegion &region) {
+                return region->buffer->data.same_as(write_buffer_data.value());
+              });
+          if (access.HasAnyAccess() || completed_read) {
             last_access = static_cast<int>(ci);
           }
         }

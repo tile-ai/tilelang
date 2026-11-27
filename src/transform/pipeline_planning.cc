@@ -630,7 +630,8 @@ public:
   }
 
   void AnalyzeCopyLastUse(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+      std::vector<PipelineStageInfo> *pipeline_stage_infos,
+      const std::vector<Array<BufferRegion>> *completed_reads = nullptr) const {
     for (auto &pinfo : *pipeline_stage_infos) {
       if (!pinfo.IsCopyStage()) {
         continue;
@@ -665,6 +666,21 @@ public:
         }
       }
       pinfo.direct_copy_last_use_stmt_index = pinfo.last_use_stmt_index;
+      if (completed_reads != nullptr) {
+        for (int i = pinfo.original_stmt_index + 1;
+             i < static_cast<int>(completed_reads->size()); ++i) {
+          for (const BufferRegion &read : (*completed_reads)[i]) {
+            if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
+                             [&](const BufferRegion &r) {
+                               return PipelineRegionsMayConflict(
+                                   r, read, thread_domains_);
+                             }) != pinfo.writes.end()) {
+              pinfo.last_use_stmt_index =
+                  std::max(pinfo.last_use_stmt_index, i);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1023,8 +1039,10 @@ private:
   }
 
   void AnalyzeCopyLastUse(
-      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    MakeStageAnalyzer().AnalyzeCopyLastUse(pipeline_stage_infos);
+      std::vector<PipelineStageInfo> *pipeline_stage_infos,
+      const std::vector<Array<BufferRegion>> *completed_reads = nullptr) const {
+    MakeStageAnalyzer().AnalyzeCopyLastUse(pipeline_stage_infos,
+                                           completed_reads);
   }
 
   bool PropagateProducersForCopy(
@@ -1183,10 +1201,18 @@ private:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
+    std::vector<Array<BufferRegion>> completed_reads;
+    if (!CollectAsyncGemmCompletionReads(analysis.scheduled_stmts,
+                                         &completed_reads)) {
+      For sequential = GetRef<For>(loop);
+      sequential.CopyOnWrite()->annotations.erase("num_stages");
+      return StmtExprMutator::VisitStmt_(sequential.get());
+    }
+
     // Determine each real copy's scheduling anchor before extending the
     // producer group. Non-copy producers inherit this anchor rather than
     // replacing it with their direct consumer.
-    AnalyzeCopyLastUse(&pipeline_stage_infos);
+    AnalyzeCopyLastUse(&pipeline_stage_infos, &completed_reads);
 
     // Follow scalar use-def and buffer RAW edges in one backward worklist.
     // This reaches mixed chains such as buffer store -> Bind -> copy and keeps
