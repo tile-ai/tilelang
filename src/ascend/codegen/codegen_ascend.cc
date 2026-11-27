@@ -1890,6 +1890,32 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::activemask())) {
     ICHECK(op->args.empty()) << "tl.activemask takes no arguments.";
     os << "((uint64_t)asc_activemask())";
+  } else if (op->op.same_as(tl::any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
+    // CANN exposes asc_any(predicate), which always votes over the whole warp
+    // and cannot restrict the vote to a lane mask. Derive the masked vote from
+    // asc_ballot instead, so `mask` is honoured exactly as tl.ballot_sync does
+    // on this target.
+    //
+    // asc_ballot takes an int32_t. tl.any_sync accepts any integer predicate,
+    // so a 64-bit value whose set bits all live above bit 31 would otherwise
+    // truncate to zero and vote false. `!!` collapses the predicate to 0/1
+    // before that conversion, mirroring the `!` in the ALL arm below.
+    os << "((int32_t)((asc_ballot(!!(";
+    PrintExpr(op->args[1], os);
+    os << ")) & static_cast<uint32_t>(";
+    PrintExpr(op->args[0], os);
+    os << ")) != 0U))";
+  } else if (op->op.same_as(tl::all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.all_sync expects <mask, predicate>.";
+    // "every lane in `mask` votes true" is tested as "no lane in `mask` votes
+    // false", which keeps the mask operand evaluated exactly once and, like
+    // the ANY arm, collapses a wide predicate to 0/1 before asc_ballot.
+    os << "((int32_t)((asc_ballot(!(";
+    PrintExpr(op->args[1], os);
+    os << ")) & static_cast<uint32_t>(";
+    PrintExpr(op->args[0], os);
+    os << ")) == 0U))";
   } else if (op->op.same_as(tl::ascend_get_buf())) {
     ICHECK_EQ(op->args.size(), 3)
         << "tl.ascend_get_buf expects exactly 3 arguments "
