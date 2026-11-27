@@ -5418,11 +5418,17 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
     bool is_int4_scalar_local =
         (alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4)) &&
         alloc_dtype.is_scalar() && scope == "local";
+    // General local allocations defer printing the element type to the
+    // "local" branch below, which emits it after alignas(16): local arrays
+    // may be accessed through vector casts, and alignas placed after the
+    // type specifier is ignored by nvcc.
+    bool is_general_local =
+        scope == "local" && !is_fp4_scalar_local && !is_int4_scalar_local;
     if (!is_fp4_scalar_local && !is_int4_scalar_local) {
       PrintStorageScope(scope, stream);
       if (is_float4_unpacked_shared) {
         stream << "uint8_t";
-      } else {
+      } else if (!is_general_local) {
         PrintType(alloc_dtype, stream);
       }
     }
@@ -5468,6 +5474,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
                  << (constant_size + 1) / 2 << "];\n";
           fp4_packed_buffers_[op->buffer->data] = vid_packed;
         } else {
+          stream << "alignas(16) ";
+          PrintType(alloc_dtype, stream);
           stream << ' ' << vid << '[' << constant_size << "];\n";
         }
       }
