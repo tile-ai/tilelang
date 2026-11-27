@@ -61,17 +61,25 @@ def flash_attention_fwd(
     # real limits of the current kernel, not tunables — validate explicitly
     # rather than advertise flexibility the code does not have.
     assert head_dim == 128, "The SIMD packing path requires head_dim == 128."
-    assert BR % 2 == 0
-    assert BC == 2 * VL
-    assert q_len % BR == 0
-    assert kv_len % BC == 0
+    assert BR % 2 == 0, f"block_q must be even, got {BR}."
+    assert BC == 2 * VL, f"block_kv must be 2 * {VL} = {2 * VL}, got {BC}."
+    assert q_len % BR == 0, (
+        f"q_len ({q_len}) must be a multiple of block_q ({BR}); "
+        f"S1 * G must be divisible by {BR} (see flash_attention/README.md, Limitations)."
+    )
+    assert kv_len % BC == 0, (
+        f"kv_len ({kv_len}) must be a multiple of block_kv ({BC}); "
+        "S2 must be divisible by 128 (see flash_attention/README.md, Limitations)."
+    )
 
     NUM_M_TILES = q_len // BR
     NUM_KV_BLOCKS = kv_len // BC
     NUM_BLOCKS = NUM_M_TILES if num_blocks is None else num_blocks
-    assert NUM_BLOCKS > 0
-    assert NUM_KV_BLOCKS > 0
-    assert NUM_M_TILES % NUM_BLOCKS == 0, "M tiles must divide evenly across cores."
+    assert NUM_BLOCKS > 0, f"num_blocks must be positive, got {NUM_BLOCKS}."
+    assert NUM_KV_BLOCKS > 0, f"kv_len ({kv_len}) must cover at least one block_kv ({BC})."
+    assert NUM_M_TILES % NUM_BLOCKS == 0, (
+        f"num_blocks ({NUM_BLOCKS}) must divide the {NUM_M_TILES} query tiles (M tiles must divide evenly across cores)."
+    )
     M_TILES_PER_BLOCK = NUM_M_TILES // NUM_BLOCKS
 
     is_cast_out = out_dtype != accum_dtype
