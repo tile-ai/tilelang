@@ -2,10 +2,12 @@
 
 import torch
 import tilelang
+import tilelang.testing
 
 from example_mha import mha, ref_program
 
 
+@tilelang.testing.requires_ascend
 def test_mha():
     D = 128
     SEQ_LEN = 4096

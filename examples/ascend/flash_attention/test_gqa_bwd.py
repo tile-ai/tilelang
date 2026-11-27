@@ -1,10 +1,13 @@
 """Correctness test for the grouped-query FlashAttention backward kernels."""
 
 import pytest
+import tilelang
+import tilelang.testing
 
 from example_gqa_bwd import run_correctness
 
 
+@tilelang.testing.requires_ascend
 @pytest.mark.parametrize("S1,G,S2", [(192, 2, 128), (320, 2, 640), (512, 2, 384)])
 def test_gqa_bwd(S1, G, S2):
     # Three query tiles cover loops shorter than the four-slot input ring;
