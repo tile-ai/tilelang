@@ -231,10 +231,9 @@ def annotate_manual_multi_buffer(*items):
     """
 
     def _as_count(n, buffer):
-        n = int(n.value if isinstance(n, IntImm) else n)
-        if n < 1:
-            raise ValueError(f"manual multi-buffer version count must be >= 1, got {n} for buffer {buffer}")
-        return n
+        if isinstance(n, bool) or not isinstance(n, (int, IntImm)) or int(n) < 1:
+            raise ValueError(f"manual multi-buffer version count must be a positive integer, got {n!r} for buffer {buffer}")
+        return int(n)
 
     _buffer_versions_map = {}
     for item in items:
