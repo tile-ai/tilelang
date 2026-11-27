@@ -80,6 +80,26 @@ def test_simtvf_cast(case, elems_per_thread):
     torch.testing.assert_close(y, ref, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("case", [c for c in CASES if FP8_E5M2 in c[1:3]], ids=lambda c: c[0])
+@pytest.mark.parametrize("elems_per_thread", COUNTS)
+def test_simtvf_e5m2_cast_explicit_output(case, elems_per_thread):
+    _, in_tl_dtype, out_tl_dtype, in_torch_dtype, out_torch_dtype, value_kind = case
+    n = THREADS * elems_per_thread
+    kernel = tilelang.compile(cast_kernel.get_tir(n, in_tl_dtype, out_tl_dtype), target="ascend")
+    x = make_input(n, in_torch_dtype, value_kind)
+    # Keep FP8 allocation out of the runtime adapter so this checks device casts.
+    y = torch.empty((n,), device="npu", dtype=out_torch_dtype)
+    kernel(x, y)
+    torch.npu.synchronize()
+
+    actual = y.cpu()
+    expected = x.cpu().to(out_torch_dtype)
+    if out_torch_dtype == torch.float8_e5m2:
+        actual, expected = actual.view(torch.uint8), expected.view(torch.uint8)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _broadcast_cast_arithmetic():
     @T.prim_func
     def main(

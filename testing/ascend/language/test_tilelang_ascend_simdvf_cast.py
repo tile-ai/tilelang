@@ -198,5 +198,33 @@ def test_simdvf_cast(case):
     torch.testing.assert_close(y, ref, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "in_tl_dtype,out_tl_dtype,in_torch_dtype,out_torch_dtype",
+    [
+        (F32, FP8_E5M2, torch.float32, torch.float8_e5m2),
+        (FP8_E5M2, F32, torch.float8_e5m2, torch.float32),
+        (F16, FP8_E5M2, torch.float16, torch.float8_e5m2),
+        (FP8_E5M2, F16, torch.float8_e5m2, torch.float16),
+        (BF16, FP8_E5M2, torch.bfloat16, torch.float8_e5m2),
+        (FP8_E5M2, BF16, torch.float8_e5m2, torch.bfloat16),
+    ],
+    ids=["fp32-to-e5m2", "e5m2-to-fp32", "half-to-e5m2", "e5m2-to-half", "bf16-to-e5m2", "e5m2-to-bf16"],
+)
+def test_simdvf_e5m2_cast_explicit_output(in_tl_dtype, out_tl_dtype, in_torch_dtype, out_torch_dtype):
+    kernel = tilelang.compile(cast_kernel.get_tir(N, in_tl_dtype, out_tl_dtype), target="ascend")
+    x = make_input(N, in_torch_dtype, "e5m2")
+    # Keep FP8 allocation out of the runtime adapter so this checks device casts.
+    y = torch.empty((N,), device="npu", dtype=out_torch_dtype)
+    kernel(x, y)
+    torch.npu.synchronize()
+
+    actual = y.cpu()
+    expected = x.cpu().to(out_torch_dtype)
+    if out_torch_dtype == torch.float8_e5m2:
+        actual, expected = actual.view(torch.uint8), expected.view(torch.uint8)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
