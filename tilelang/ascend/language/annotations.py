@@ -73,8 +73,10 @@ def annotate_buffer_addresses(buffer_addresses: dict):
 
     Example
     -------
-    >>> T.annotate_buffer_versions({left: 2, accum: 1})
-    >>> T.annotate_buffer_addresses({left: 262144, accum: 1024})
+    >>> src_ub = T.alloc_shared((128,), T.float16)
+    >>> proj_l1 = T.alloc_l1((64, 64), T.float16)
+    >>> T.annotate_buffer_versions({src_ub: 2, proj_l1: 1})
+    >>> T.annotate_buffer_addresses({src_ub: 1024, proj_l1: 4096})
     """
     if not buffer_addresses:
         raise ValueError("annotate_buffer_addresses requires a non-empty placement map")
@@ -142,14 +144,15 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     ... def my_kernel(x: T.Tensor((M, K), T.float16),
     ...               w: T.Tensor((N, K), T.float16),
     ...               y: T.Tensor((M, N), T.float16)):
-    ...     with T.Kernel(T.ceildiv(N, block_N), threads=128) as bx:
-    ...         fixed = T.alloc_shared((block_M, block_K), T.float16)
-    ...         inferred = T.alloc_shared((block_M, block_K), T.float16)
+    ...     with T.Kernel(NUM_CORES) as core_id:
+    ...         fixed = T.alloc_shared((BLOCK_M, BLOCK_K), T.float16)
+    ...         inferred = T.alloc_shared((BLOCK_M, BLOCK_K), T.float16)
     ...         T.annotate_buffer_versions({
     ...             fixed: (2, "counter"),
     ...             inferred: "iteration",
     ...         })
-    ...         with T.Persistent(T.ceildiv(M, block_M), num_stages=4) as i:
+    ...         for tile in T.Persistent([T.ceildiv(M, BLOCK_M)], NUM_CORES,
+    ...                                  core_id, num_stages=4):
     ...             ...
     """
     versions = {}
@@ -268,7 +271,7 @@ def annotate_unlimit_memory(*scopes: str):
     ... def my_kernel(x: T.Tensor((M, K), T.float16),
     ...               w: T.Tensor((N, K), T.float16),
     ...               y: T.Tensor((M, N), T.float16)):
-    ...     with T.Kernel(T.ceildiv(N, block_N), threads=128) as bx:
+    ...     with T.Kernel(NUM_CORES) as core_id:
     ...         T.annotate_unlimit_memory("shared")
     ...         ...
     """
