@@ -33,8 +33,8 @@ def _set_cache_dirs(monkeypatch, tmp_path):
 
 
 def _fake_bisheng_compile(compile_calls):
-    def fake_compile_ascend(code, target_format="o", npu_arch=None, options=None, verbose=False, **kwargs):
-        compile_calls.append((code, target_format, npu_arch, tuple(options or ())))
+    def fake_compile_ascend(code, npu_arch=None, options=None, verbose=False):
+        compile_calls.append((code, npu_arch, tuple(options or ())))
         return bytearray(b"fake-aibin")
 
     return fake_compile_ascend
@@ -70,7 +70,7 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
     assert bytes(fourth) == b"fake-aibin"
     # first compiles, second hits; third compiles (new options), fourth hits
     assert len(compile_calls) == 2
-    assert compile_calls[0][3] != compile_calls[1][3]
+    assert compile_calls[0][2] != compile_calls[1][2]
     cache_files = list((tmp_path / "cache").glob(f"*/ascend-binaries/*/kernel.{AIBIN}"))
     assert len(cache_files) == 2
     for cache_file in cache_files:
