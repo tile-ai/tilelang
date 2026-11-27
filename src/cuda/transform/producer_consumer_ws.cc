@@ -557,6 +557,74 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
   return has_allowed_work && !has_disallowed;
 }
 
+// Accesses used to decide whether the loop can be split into two warp groups.
+class LoopBufferAccessCollector : public StmtExprVisitor {
+public:
+  VarSet reads, writes;
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    writes.insert(op->buffer->data);
+    StmtExprVisitor::VisitStmt_(op);
+    if (op->predicate.defined()) {
+      VisitExpr(op->predicate.value());
+    }
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    reads.insert(op->buffer->data);
+    VisitLoadAddress(op);
+  }
+
+  void VisitLoadAddress(const BufferLoadNode *op) {
+    StmtExprVisitor::VisitExpr_(op);
+    if (op->predicate.defined()) {
+      VisitExpr(op->predicate.value());
+    }
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    const bool is_ptr = op->op.same_as(tl::access_ptr());
+    if (is_ptr || op->op.same_as(tl::region())) {
+      const int mask = GetConservativeAccessMask(op->args[is_ptr ? 2 : 1]);
+      const auto *base = op->args[0].as<BufferLoadNode>();
+      ICHECK(base);
+      if (is_ptr && (mask & kAccessWrite)) {
+        writes.insert(base->buffer->data);
+      }
+      if (mask == kAccessWrite) {
+        // The outer load encodes an address. Its indices (and the other
+        // arguments) can still load data.
+        VisitLoadAddress(base);
+        for (size_t i = 1; i < op->args.size(); ++i) {
+          VisitExpr(op->args[i]);
+        }
+        return;
+      }
+    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+      const Var data = GetVarFromAccessPtr(GetRef<Call>(op));
+      const int mask = GetConservativeAccessMask(op->args[4]);
+      if (mask & kAccessRead) {
+        reads.insert(data);
+      }
+      if (mask & kAccessWrite) {
+        writes.insert(data);
+      }
+    } else if (op->op.as<OpNode>()) {
+      if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
+        AccessRegions access = tile_op->GetAccessRegions();
+        for (const BufferRegion &read : access.reads) {
+          reads.insert(read->buffer->data);
+        }
+        for (const BufferRegion &write : access.writes) {
+          writes.insert(write->buffer->data);
+        }
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Helpers: create barrier IR nodes
 // ---------------------------------------------------------------------------
@@ -1419,6 +1487,83 @@ private:
         }
       }
       compute_cursor = wait_pos;
+    }
+
+    // A producer can only read loop-written data after all its writes have
+    // executed in an earlier, synchronous producer prefix in both orders.
+    struct LoopWrites {
+      size_t last_source_index = 0;
+      size_t pending = 0;
+    };
+    std::unordered_map<Var, LoopWrites, ObjectPtrHash, ObjectPtrEqual>
+        loop_writes;
+    std::unordered_map<Stmt, size_t, ObjectPtrHash, ObjectPtrEqual>
+        consumer_source_index;
+    std::vector<LoopBufferAccessCollector> accesses(flat_stmts.size());
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (!IsProducer(kinds[i])) {
+        consumer_source_index.emplace(flat_stmts[i], i);
+      }
+      accesses[i](flat_stmts[i]);
+      for (const Var &data : accesses[i].writes) {
+        auto &writes = loop_writes[data];
+        writes.last_source_index = i;
+        ++writes.pending;
+      }
+    }
+    auto reads_are_ready = [&](const VarSet &reads, size_t source_index) {
+      for (const Var &data : reads) {
+        auto it = loop_writes.find(data);
+        if (it != loop_writes.end() &&
+            (it->second.pending != 0 ||
+             it->second.last_source_index >= source_index)) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    LoopBufferAccessCollector leading_access;
+    for (const auto *bindings :
+         {&outer_leading_bindings, &inner_leading_bindings}) {
+      for (const auto &binding : *bindings) {
+        leading_access(binding.second);
+      }
+    }
+    if (loop_body_condition.defined()) {
+      leading_access(loop_body_condition.value());
+    }
+    if (!reads_are_ready(leading_access.reads, 0)) {
+      return StmtExprMutator::VisitStmt_(orig_realize);
+    }
+
+    // SIMT and cp.async producers issue before the TMA groups and prefixes.
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (IsProducer(kinds[i]) && kinds[i] != TileStmtKind::kTmaProducer &&
+          !reads_are_ready(accesses[i].reads, i)) {
+        return StmtExprMutator::VisitStmt_(orig_realize);
+      }
+    }
+    size_t group = 0;
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (kinds[i] != TileStmtKind::kTmaProducer) {
+        continue;
+      }
+      for (const Stmt &stmt : producer_loop_prefix_stmts[group++]) {
+        size_t index = consumer_source_index.at(stmt);
+        if (!reads_are_ready(accesses[index].reads, index)) {
+          return StmtExprMutator::VisitStmt_(orig_realize);
+        }
+        // Bindings can be duplicated in the consumer branch.
+        if (!stmt.as<BindNode>()) {
+          for (const Var &data : accesses[index].writes) {
+            --loop_writes.at(data).pending;
+          }
+        }
+      }
+      if (!reads_are_ready(accesses[i].reads, i)) {
+        return StmtExprMutator::VisitStmt_(orig_realize);
+      }
     }
 
     bool producer_needs_full_thread_extent = false;
