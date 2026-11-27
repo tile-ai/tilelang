@@ -67,6 +67,24 @@ class PassConfigKey(str, Enum):
     it.
     """
 
+    TL_PTO_RELAXED_MINMAX = "tl.pto.relaxed_minmax"
+    """Relaxed floating-point ``Min``/``Max`` inside ``T.Parallel`` (PTO backend).
+
+    Default: True.
+
+    - True (default): the compiler may assume the operands and the result are
+      not NaN and may ignore signed-zero differences, so a floating-point
+      ``T.min``/``T.max`` lowers to the direct VMI instruction
+      (``vmin``/``vmax``, or ``vmins``/``vmaxs`` against a lane-uniform scalar).
+    - False: keeps the ordered comparison plus ``Select`` lowering, which
+      preserves NaN propagation and the sign of zero and costs one compare
+      plus one select.
+
+    Integer ``Min``/``Max`` always use the direct instruction: integer
+    comparison has no NaN or signed-zero ambiguity. Under the relaxed form,
+    ``min/max(NaN, 1)`` yields NaN instead of 1, ``min(-0, +0)`` yields -0
+    instead of +0, and ``max(+0, -0)`` yields +0 instead of -0.
+    """
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: True
 

@@ -48,6 +48,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <utility>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -855,6 +856,14 @@ private:
     if (const auto *div = expr.as<DivNode>()) {
       return ConvertBinary(div->a, div->b, "vdiv", pre);
     }
+    // Min/Max survive Legalize when the direct instruction is usable: always for
+    // integers, and for floating point under tl.pto.relaxed_minmax.
+    if (const auto *minn = expr.as<MinNode>()) {
+      return ConvertMinMax(minn->a, minn->b, /*is_min=*/true, pre);
+    }
+    if (const auto *maxn = expr.as<MaxNode>()) {
+      return ConvertMinMax(maxn->a, maxn->b, /*is_min=*/false, pre);
+    }
     if (const auto *call = expr.as<CallNode>()) {
       // Lane-mask boolean combinations come first. They are not unary
       // math, so the strict unary-math mapping below must not see them
@@ -1214,6 +1223,38 @@ private:
     return EmitBind(vmi_name,
                     Call(VectorDType(a.dtype().element_of(), lanes_),
                          VmiOp(vmi_name), {a, b, mask_var_}),
+                    pre);
+  }
+
+  // Min/Max kept by Legalize lower to the direct VMI instruction. The operand
+  // forms decide which one; the pass config is not read again here:
+  //   two vectors                    -> vmin / vmax
+  //   one vector + one scalar        -> vmins / vmaxs (vector first)
+  //   two lane-uniform scalars       -> scalar Min / Max
+  PrimExpr ConvertMinMax(const PrimExpr &lhs, const PrimExpr &rhs, bool is_min,
+                         Array<Stmt> *pre) {
+    PrimExpr a = ConvertExpr(lhs, pre);
+    PrimExpr b = ConvertExpr(rhs, pre);
+    const bool a_vec = a.dtype().lanes() > 1;
+    const bool b_vec = b.dtype().lanes() > 1;
+    if (!a_vec && !b_vec) {
+      // A fully lane-uniform Min/Max stays scalar with the TIR semantics.
+      if (is_min) {
+        return Min(a, b);
+      }
+      return Max(a, b);
+    }
+    if (!a_vec) {
+      // The vector-scalar instruction reads (vector, scalar, mask). Min/Max are
+      // commutative, so swapping to put the vector first is free.
+      std::swap(a, b);
+    }
+    const bool scalar_rhs = b.dtype().lanes() == 1;
+    const std::string op =
+        is_min ? (scalar_rhs ? "vmins" : "vmin") : (scalar_rhs ? "vmaxs" : "vmax");
+    return EmitBind(op,
+                    Call(VectorDType(a.dtype().element_of(), lanes_), VmiOp(op),
+                         {a, b, mask_var_}),
                     pre);
   }
 

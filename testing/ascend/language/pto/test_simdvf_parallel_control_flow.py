@@ -31,6 +31,7 @@ from contextlib import contextmanager
 
 import pytest
 
+import tilelang
 import tilelang.ascend.language as T
 from tilelang.ascend import transform as ascend_transform
 from tilelang.ascend.target import normalize_pto_target
@@ -80,14 +81,18 @@ def _stage_capture():
         ascend_transform.VectorizeParallelToPTO = original_vectorize
 
 
-def _lower_capture(func, *, expect_error=False):
+def _lower_capture(func, *, expect_error=False, pass_configs=None):
     """Lower *func* for PTO and return (captured_stages, error)."""
     target = normalize_pto_target("pto")
     error = None
     with _stage_capture() as captured:
         try:
             with target:
-                _lower(func, target=target)
+                if pass_configs:
+                    with tvm.transform.PassContext(config=pass_configs):
+                        _lower(func, target=target)
+                else:
+                    _lower(func, target=target)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller
             error = exc
     if error is not None and not expect_error:
@@ -401,17 +406,128 @@ def test_conditional_arm_that_reads_its_own_write_keeps_arm_order():
 
 
 @pytest.mark.pto
-def test_minmax_legalizes_without_residual_max_min_nodes():
+def test_relaxed_minmax_uses_the_direct_instruction():
+    """Default `tl.pto.relaxed_minmax`: a floating-point Min/Max keeps its node
+    and lowers to the direct VMI instruction, without a compare or a select."""
     E, lanes = 150, 128
-    stages, _ = _lower_capture(_k_minmax(E, lanes))
+    stages, error = _lower_capture(_k_minmax(E, lanes))
+    assert error is None, f"a floating-point Min/Max must lower, got: {error}"
 
     legalized = stages["legalize"]
-    assert not _max_min_nodes(legalized), "Legalize must rewrite Min/Max into the Select form"
-    assert _selects(legalized), "the rewritten Min/Max must be a Select before vectorization"
+    assert _max_min_nodes(legalized), "the relaxed form must keep Min/Max as nodes"
+    assert not _selects(legalized), "the relaxed form must not synthesize a Select"
 
-    vectorized = stages["vectorize"]
-    names = _vmi_call_names(vectorized)
-    assert "tl.vmi.vsel" in names, "the rewritten Min/Max must lower to vsel"
+    names = _vmi_call_names(stages["vectorize"])
+    assert names.get("tl.vmi.vmax", 0) == 1 and names.get("tl.vmi.vmin", 0) == 1, (
+        f"both the Max and the Min must use the direct instruction, got {names}"
+    )
+    assert "tl.vmi.vsel" not in names, f"no value choice is needed, got {names}"
+    assert "tl.vmi.vcmp" not in names and "tl.vmi.vcmps" not in names, (
+        f"no comparison is needed, got {names}"
+    )
+
+
+@pytest.mark.pto
+def test_strict_minmax_keeps_the_select_lowering():
+    """`tl.pto.relaxed_minmax=False`: the floating-point form keeps the ordered
+    comparison plus Select, which preserves NaN and the sign of zero."""
+    E, lanes = 150, 128
+    stages, error = _lower_capture(
+        _k_minmax(E, lanes),
+        pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: False},
+    )
+    assert error is None, f"the strict form must lower, got: {error}"
+
+    legalized = stages["legalize"]
+    assert not _max_min_nodes(legalized), "the strict form must rewrite Min/Max into Select"
+    assert _selects(legalized), "the strict form must be a Select before vectorization"
+
+    names = _vmi_call_names(stages["vectorize"])
+    assert "tl.vmi.vsel" in names, f"the strict form must lower to vsel, got {names}"
+    assert "tl.vmi.vmin" not in names and "tl.vmi.vmax" not in names, (
+        f"the strict form must not use the direct instruction, got {names}"
+    )
+def _k_minmax_int(E=256, lanes=64):
+    """Integer Min/Max: the direct instruction is exact, so the node stays."""
+
+    P = (E + lanes - 1) // lanes * lanes
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((P,), "int32"),
+        B: T.Tensor((P,), "int32"),
+        C: T.Tensor((P,), "int32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((P,), "int32")
+            b = T.alloc_shared((P,), "int32")
+            c = T.alloc_shared((P,), "int32")
+            T.copy(A, a)
+            T.copy(B, b)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    c[i] = T.min(a[i], b[i])
+            T.copy(c, C)
+
+    return main
+
+
+@pytest.mark.pto
+@pytest.mark.parametrize("relaxed", [True, False])
+def test_integer_minmax_always_uses_the_direct_instruction(relaxed):
+    """Integer Min/Max has no NaN or signed-zero ambiguity, so it keeps the node
+    (and the direct instruction) under either setting of the config."""
+    stages, error = _lower_capture(
+        _k_minmax_int(),
+        pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
+    )
+    assert error is None, f"an integer Min must lower, got: {error}"
+
+    assert _max_min_nodes(stages["legalize"]), "an integer Min must stay a node"
+    names = _vmi_call_names(stages["vectorize"])
+    assert names.get("tl.vmi.vmin", 0) == 1, f"expected one vmin, got {names}"
+    assert "tl.vmi.vsel" not in names, f"an integer Min needs no select, got {names}"
+
+
+def _k_minmax_vector_scalar(E=256, lanes=64, scalar_first=False):
+    """`T.max` of a lane-varying vector and a lane-uniform runtime scalar.
+
+    The operand order is chosen at trace time, so each variant is a plain Max of
+    the same two values.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E,), "float32"),
+        Y: T.Tensor((E,), "float32"),
+        thr: T.float32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((E,), "float32")
+            T.copy(A, a)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    y[i] = T.max(thr, a[i]) if scalar_first else T.max(a[i], thr)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+@pytest.mark.parametrize("scalar_first", [False, True])
+def test_vector_scalar_minmax_uses_the_scalar_instruction(scalar_first):
+    """A vector/scalar Min/Max uses vmins/vmaxs with the vector first; a
+    scalar-left expression is swapped, which is free because Min/Max commute."""
+    stages, error = _lower_capture(_k_minmax_vector_scalar(scalar_first=scalar_first))
+    assert error is None, f"a vector/scalar Max must lower, got: {error}"
+
+    names = _vmi_call_names(stages["vectorize"])
+    assert names.get("tl.vmi.vmaxs", 0) == 1, f"expected one vmaxs, got {names}"
+    assert "tl.vmi.vmax" not in names, f"the vector form must not be used, got {names}"
+    assert "tl.vmi.vbrc" not in names, (
+        f"the scalar form needs no broadcast, got {names}"
+    )
 
 
 def _k_uniform_minmax_scalar(E=256, lanes=64):
@@ -438,13 +554,11 @@ def _k_uniform_minmax_scalar(E=256, lanes=64):
 
 
 @pytest.mark.pto
-def test_uniform_minmax_select_stays_scalar_in_the_unit():
-    """Legalize rewrites Min/Max to Select even when both operands are
-    lane-uniform runtime scalars, so the converted value must stay scalar:
-    a fully lane-uniform Select is a valid PTODSL value (pto.select), and
-    keeping it scalar preserves the scalar-domain arithmetic Verify
-    admitted -- promoting it to a vreg would turn `c * c` into an int8
-    vector multiply the VMI element set does not carry."""
+def test_uniform_minmax_stays_scalar_in_the_unit():
+    """Two lane-uniform integer operands keep a scalar Min/Max node: the value
+    must stay scalar so `c * c` remains a scalar multiply -- promoting it to a
+    vreg would turn that into an int8 vector multiply the VMI element set does
+    not carry -- and a scalar Min/Max has no vector instruction to use."""
 
     stages, error = _lower_capture(_k_uniform_minmax_scalar())
     assert error is None, f"the uniform Min/Max form must lower, got: {error}"
@@ -458,7 +572,10 @@ def test_uniform_minmax_select_stays_scalar_in_the_unit():
     # that combination point (one vbrc for the scalar addend); the Select
     # itself survives as a scalar TIR node.
     assert names.get("tl.vmi.vbrc", 0) == 1, f"only the add's scalar operand should be broadcast, got {names}"
-    assert _selects(stages["vectorize"]), "the scalar Select must survive"
+    assert names.get("tl.vmi.vmin", 0) == 0 and names.get("tl.vmi.vmins", 0) == 0, (
+        f"a fully lane-uniform Min must stay scalar, got {names}"
+    )
+    assert _max_min_nodes(stages["vectorize"]), "the scalar Min node must survive"
 
 
 @pytest.mark.pto

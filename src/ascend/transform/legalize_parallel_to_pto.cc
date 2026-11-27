@@ -16,6 +16,7 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -509,12 +510,23 @@ public:
   // Min/Max -> Select so Vectorize only needs cmp + vsel. Rewritten only
   // inside a T.Parallel unit in a converting region: scalar expressions in
   // sibling serial code within the same SIMD_VF keep their Min/Max shape.
+  // Min/Max stay nodes when the direct VMI instruction is usable: integers
+  // always (integer comparison has no NaN or signed-zero ambiguity), floating
+  // point only under `tl.pto.relaxed_minmax`, whose default accepts the
+  // instruction's NaN and signed-zero semantics.
+  bool KeepMinMaxNode(const DataType &dtype) const {
+    return dtype.is_int() || dtype.is_uint() || relaxed_minmax_;
+  }
+
   PrimExpr VisitExpr_(const MinNode *op) final {
     if (!in_parallel_) {
       return StmtExprMutator::VisitExpr_(op);
     }
     PrimExpr a = VisitExpr(op->a);
     PrimExpr b = VisitExpr(op->b);
+    if (KeepMinMaxNode(op->dtype)) {
+      return Min(a, b);
+    }
     return Select(a < b, a, b);
   }
   PrimExpr VisitExpr_(const MaxNode *op) final {
@@ -523,6 +535,9 @@ public:
     }
     PrimExpr a = VisitExpr(op->a);
     PrimExpr b = VisitExpr(op->b);
+    if (KeepMinMaxNode(op->dtype)) {
+      return Max(a, b);
+    }
     return Select(a > b, a, b);
   }
 
@@ -969,6 +984,9 @@ public:
     }
     return flat.empty() ? Stmt(Evaluate(0)) : Stmt(SeqStmt::Flatten(flat));
   }
+  // tl.pto.relaxed_minmax (default true): floating-point Min/Max may use the
+  // direct VMI instruction, accepting its NaN and signed-zero semantics.
+  bool relaxed_minmax_ = true;
   bool in_simd_vf_ = false;
   bool in_parallel_ = false;
   int condition_serial_ = 0;
@@ -993,9 +1011,10 @@ public:
   std::vector<std::pair<Var, Range>> outer_ranges_;
 };
 
-PrimFunc LowerControlFlow(PrimFunc f) {
+PrimFunc LowerControlFlow(PrimFunc f, bool relaxed_minmax) {
   auto *n = f.CopyOnWrite();
   ControlFlowMutator mutator;
+  mutator.relaxed_minmax_ = relaxed_minmax;
   // Storage origins are collected before the fold so the ordering analysis can
   // tell two independent allocations apart from two views of one storage.
   const bool no_alias = [&] {
@@ -1018,12 +1037,16 @@ namespace transform {
 
 tvm::transform::Pass LegalizeParallelToPTO() {
   auto pass_func = [](PrimFunc f, const IRModule &,
-                      const tvm::transform::PassContext &) {
+                      const tvm::transform::PassContext &ctx) {
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target.defined() || !TargetIsPTO(target.value())) {
       return f;
     }
-    return LowerControlFlow(std::move(f));
+    // Floating-point Min/Max may use the direct VMI instruction unless the
+    // caller opts into the NaN- and signed-zero-preserving Select lowering.
+    const bool relaxed_minmax =
+        ctx->GetConfig<Bool>("tl.pto.relaxed_minmax", Bool(true)).value()->value;
+    return LowerControlFlow(std::move(f), relaxed_minmax);
   };
   return tvm::tirx::transform::CreatePrimFuncPass(
       pass_func, 0, "tl.LegalizeParallelToPTO", {});

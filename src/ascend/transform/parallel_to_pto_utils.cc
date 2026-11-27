@@ -1114,8 +1114,10 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
     b = &fmod->b;
     known_op = metadata_mode;
   } else if (const auto *minn = expr.as<MinNode>()) {
-    // Min/Max classify like the comparisons in value mode too;
-    // LegalizeParallelToPTO rewrites them into Select before Vectorize.
+    // Min/Max classify like the comparisons in value mode too. Legalize keeps
+    // them as nodes whenever the direct instruction is usable (integers always,
+    // floating point under tl.pto.relaxed_minmax) and rewrites them into Select
+    // otherwise, so both forms reach Vectorize.
     a = &minn->a;
     b = &minn->b;
     known_op = true;
