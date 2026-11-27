@@ -78,6 +78,63 @@ private:
       StmtExprVisitor::VisitExpr_(op);
     }
 
+    void AddWriteFromPtrExpr(const PrimExpr &ptr) {
+      if (const auto *call = ptr.as<CallNode>()) {
+        if (call->op.same_as(builtin::address_of())) {
+          if (!call->args.empty()) {
+            if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+              AddWrite(load->buffer);
+              return;
+            }
+            if (const auto *var_node = call->args[0].as<VarNode>()) {
+              auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
+              if (it != buffer_data_to_buffer_.end()) {
+                AddWrite((*it).second);
+              }
+            }
+          }
+          return;
+        }
+        if (call->op.same_as(tl::access_ptr())) {
+          if (!call->args.empty()) {
+            if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+              AddWrite(load->buffer);
+            }
+          }
+          return;
+        }
+        if (call->op.same_as(builtin::tvm_access_ptr())) {
+          if (call->args.size() > 1) {
+            if (const auto *var_node = call->args[1].as<VarNode>()) {
+              auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
+              if (it != buffer_data_to_buffer_.end()) {
+                AddWrite((*it).second);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    bool IsAtomicRMWElemOp(const CallNode *op) const {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(tl::atomic_add_elem_op()) ||
+               call_op.same_as(tl::atomic_add_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_addx2_elem_op()) ||
+               call_op.same_as(tl::atomic_addx2_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_addx4_elem_op()) ||
+               call_op.same_as(tl::atomic_addx4_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_max_elem_op()) ||
+               call_op.same_as(tl::atomic_max_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_min_elem_op()) ||
+               call_op.same_as(tl::atomic_min_ret_elem_op()) ||
+               call_op.same_as(tl::atomic_or_elem_op()) ||
+               call_op.same_as(tl::atomic_store_elem_op());
+      }
+      return false;
+    }
+
     void VisitExpr_(const CallNode *op) final {
       if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
         if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
@@ -89,6 +146,20 @@ private:
                          access.writes.end());
         }
         StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
+      // Atomic RMW/store destinations are writes even when the pointer is
+      // formed with address_of (which otherwise only records a read). Without
+      // this, IfStmtBinding can inline a pre-atomic scalar bind past the RMW
+      // (issue #2594 residual after #2651 covered access_ptr write masks).
+      if (IsAtomicRMWElemOp(op)) {
+        if (!op->args.empty()) {
+          AddWriteFromPtrExpr(op->args[0]);
+          this->VisitExpr(op->args[0]);
+          for (size_t i = 1; i < op->args.size(); ++i) {
+            this->VisitExpr(op->args[i]);
+          }
+        }
         return;
       }
       if (op->op.same_as(builtin::address_of())) {
