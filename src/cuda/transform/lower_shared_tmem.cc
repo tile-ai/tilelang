@@ -543,6 +543,10 @@ private:
       if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
         new_body.push_back(
             Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
+      } else {
+        new_body.push_back(
+            Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
+                          {StringImm("shared")})));
       }
       new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
                                     dealloc_tmem_calls_.size() > 1
