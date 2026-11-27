@@ -17,6 +17,11 @@ TIR_DEFINE_TL_BUILTIN(cooperative_tensor_fill)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(cooperative_tensor_set_element)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(cooperative_tensor_load)
     .set_num_inputs(11)
     .set_attr<TCallEffectKind>("TCallEffectKind",

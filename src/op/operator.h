@@ -139,6 +139,11 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // Product of the enclosing threadIdx.x/y/z launch extents, before any
+  // branch-local analyzer narrowing. Defaults to one without thread bindings.
+  PrimExpr block_num_threads = IntImm(DataType::Int(64), 1);
+  // Whether an enclosing branch depends on the logical thread index.
+  bool has_thread_dependent_branch = false;
 };
 
 /*! \brief One reducer_update site, as seen by layout analysis: the update

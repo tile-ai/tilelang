@@ -15,6 +15,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../layout/layout.h"
@@ -1010,8 +1011,21 @@ private:
     return var;
   }
 
+  bool UsesThreadDependentValue(const PrimExpr &expr) const {
+    return tirx::UsesVar(expr, [&](const VarNode *node) {
+      Var var = GetRef<Var>(node);
+      return (thread_binding_.defined() && var.same_as(thread_binding_->var)) ||
+             thread_dependent_vars_.count(var);
+    });
+  }
+
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
+    // Keep provenance separately from analyzer substitutions: buffer reads
+    // cannot be re-evaluated or substituted as if they were pure expressions.
+    if (UsesThreadDependentValue(analyzer_->Simplify(value))) {
+      thread_dependent_vars_.insert(op->var);
+    }
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
       bind_var_to_expr_[op->var] = value;
@@ -1149,6 +1163,8 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
+    lower_args.block_num_threads = block_num_threads_;
+    lower_args.has_thread_dependent_branch = has_thread_dependent_branch_;
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
@@ -1171,17 +1187,36 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    bool previous = has_thread_dependent_branch_;
+    // Simplify before entering the branch: its own constraint would make the
+    // condition trivially true and conceal divergent lanes.
+    PrimExpr condition = analyzer_->Simplify(op->condition);
+    has_thread_dependent_branch_ |= UsesThreadDependentValue(condition);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    has_thread_dependent_branch_ = previous;
+    return stmt;
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    PrimExpr previous_block_num_threads = block_num_threads_;
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
+      if (iv->thread_tag == "threadIdx.x" || iv->thread_tag == "threadIdx.y" ||
+          iv->thread_tag == "threadIdx.z") {
+        block_num_threads_ = analyzer_->Simplify(
+            block_num_threads_ * cast(DataType::Int(64), op->value));
+      }
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    block_num_threads_ = previous_block_num_threads;
+    return stmt;
   }
 
   /**
@@ -1437,6 +1472,8 @@ private:
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
   size_t thread_block_size_ = 0;
+  PrimExpr block_num_threads_ = IntImm(DataType::Int(64), 1);
+  bool has_thread_dependent_branch_ = false;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children
@@ -1455,6 +1492,9 @@ private:
   bool is_ptx_{false};
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
       bind_var_to_expr_;
+  // Bind variables have SSA identity, so provenance remains valid across
+  // visits.
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> thread_dependent_vars_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
