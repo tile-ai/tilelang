@@ -146,5 +146,55 @@ def test_sliced_region_past_the_end_of_the_buffer_is_rejected(op, lo, hi, fits):
             tilelang.lower(program(), target=target)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("columns", [16, 17])
+def test_fill_preserves_padded_partition_bounds(shared, columns):
+    @T.prim_func
+    def main(out: T.Tensor((16, columns + 1), "float32")):
+        with T.Kernel(1, threads=128):
+            if shared:
+                values = T.alloc_shared((16, columns), "float32")
+                T.fill(values, -123)
+                T.copy(values, out[:, :columns])
+            else:
+                T.fill(out[:, :columns], -123)
+
+    kernel = tilelang.compile(main, target="cuda")
+    output = torch.full((16, columns + 1), 7, dtype=torch.float32, device="cuda")
+    kernel(output)
+    expected = torch.full_like(output, -123)
+    expected[:, -1] = 7
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("target_kind", ["metal", "webgpu"])
+@pytest.mark.parametrize("scope", ["global", "shared"])
+@pytest.mark.parametrize("columns", [16, 17])
+def test_fill_padding_guards_in_core_lowering(target_kind, scope, columns):
+    from tilelang.testing.ir import assert_call_count
+
+    @T.prim_func
+    def main(out: T.Tensor((16, columns + 1), "float32")):
+        with T.Kernel(1, threads=128):
+            if scope == "global":
+                T.fill(out[:, :columns], -123)
+            else:
+                values = T.alloc_shared((16, columns), "float32")
+                T.fill(values, -123)
+                for i, j in T.Parallel(16, columns):
+                    out[i, j] = values[i, j]
+
+    # These operator registrations are always built; no device codegen or
+    # runtime is needed to exercise the padded partition in either backend.
+    target = tvm.target.Target({"kind": target_kind})
+    with target:
+        mod = tvm.tirx.transform.BindTarget(target)(tvm.IRModule.from_expr(main))
+        mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+        mod = tilelang.transform.LayoutInference()(mod)
+        mod = tilelang.transform.LowerTileOp()(mod)
+    assert_call_count(mod, op="tl.tileop.fill", count=0)
+
+
 if __name__ == "__main__":
     test_matmul()
