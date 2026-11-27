@@ -1562,6 +1562,15 @@ private:
         VisitScopedBlock(op->iter_vars, op->alloc_buffers, op->body);
       }
       void VisitStmt_(const SBlockRealizeNode *op) final {
+        // The realize header is evaluated in the enclosing scope, before the
+        // block variables exist. A load in the condition or in an iteration
+        // value is a predicate position like any other, so it must be admitted
+        // here: visiting only the body would let it through unchecked while the
+        // same load in a sibling Evaluate is rejected.
+        VisitExpr(op->predicate);
+        for (const PrimExpr &value : op->iter_values) {
+          VisitExpr(value);
+        }
         VisitScopedBlock(op->block->iter_vars, op->block->alloc_buffers,
                          op->block->body);
       }

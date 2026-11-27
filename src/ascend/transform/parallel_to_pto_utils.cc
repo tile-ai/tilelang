@@ -1967,7 +1967,7 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
   return origins;
 }
 
-bool MayConflictStorage(const BufferNode *lhs, const BufferNode *rhs,
+bool MayConflictStorage(const Buffer &lhs, const Buffer &rhs,
                         const StorageOrigins &origins) {
   const VarNode *lhs_var = lhs->data.get();
   const VarNode *rhs_var = rhs->data.get();
@@ -1994,10 +1994,9 @@ bool MayConflictStorage(const BufferNode *lhs, const BufferNode *rhs,
   return true;
 }
 
-bool CollectStores(const Stmt &stmt,
-                   std::vector<const BufferStoreNode *> *out) {
+bool CollectStores(const Stmt &stmt, std::vector<BufferStore> *out) {
   if (const auto *store = stmt.as<BufferStoreNode>()) {
-    out->push_back(store);
+    out->push_back(GetRef<BufferStore>(store));
     return true;
   }
   if (pto::IsNoOpStmt(stmt)) {

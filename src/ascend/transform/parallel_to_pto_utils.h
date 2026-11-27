@@ -456,7 +456,7 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
  * parameters are independent only under an explicit no-alias contract that does
  * not mark either as non-restrict. Anything else stays conservatively
  * conflicting. Verify and Legalize share this judgment. */
-bool MayConflictStorage(const BufferNode *lhs, const BufferNode *rhs,
+bool MayConflictStorage(const Buffer &lhs, const Buffer &rhs,
                         const StorageOrigins &origins);
 
 /*!
@@ -493,7 +493,7 @@ const RelationalKind *RelationalByName(const char *cmp);
  * \brief Collect a flat list of stores from \p stmt (a store, a no-op, or a
  * Seq of those). Returns false when the statement is any other shape.
  */
-bool CollectStores(const Stmt &stmt, std::vector<const BufferStoreNode *> *out);
+bool CollectStores(const Stmt &stmt, std::vector<BufferStore> *out);
 } // namespace pto
 } // namespace tl
 } // namespace tvm

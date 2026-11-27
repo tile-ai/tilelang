@@ -154,12 +154,17 @@ def test_plain_runtime_shell_runs_or_skips(iters):
     rng = np.random.default_rng(12)
     x = rng.uniform(-2.0, 2.0, E).astype(np.float32)
     kernel = _compile_builder(_build_runtime_shells)
-    out = torch.full((2, E), -7.0, dtype=torch.float32, device=_dev())
+    # The GM output starts at a *different* sentinel than the UB seed (-7.0):
+    # with the same value a kernel that skipped both the seed and the final copy
+    # would pass the iters == 0 assertion below.
+    out = torch.full((2, E), -9.0, dtype=torch.float32, device=_dev())
     kernel(torch.from_numpy(x).to(_dev()), out, iters)
     got = out.cpu().numpy().astype(np.float32)[1]
     if iters == 0:
         # The shell never runs, so the store inside it never executes and the
         # output keeps the seed: pin that (no phantom write).
+        # -7.0 can only come from the UB seed plus the final copy: the GM buffer
+        # started at -9.0.
         assert np.all(got == np.float32(-7.0)), f"iters=0 must not write, got {got[:4]}"
         return
     want = (x * np.float32(2.0)).astype(np.float32)

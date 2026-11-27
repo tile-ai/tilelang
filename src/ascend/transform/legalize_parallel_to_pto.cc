@@ -50,14 +50,17 @@ namespace {
 class LoadCollector : public tirx::StmtExprVisitor {
 public:
   struct Location {
-    const BufferNode *buffer;
+    // A handle, not a borrowed node pointer: the ordering analysis keeps these
+    // locations while it rewrites the tree, so their lifetime must not depend on
+    // the input tree staying alive and unmodified.
+    Buffer buffer;
     Array<PrimExpr> indices;
   };
 
   std::vector<Location> loads;
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    loads.push_back({op->buffer.get(), op->indices});
+    loads.push_back({op->buffer, op->indices});
     tirx::StmtExprVisitor::VisitExpr_(op);
   }
 };
@@ -147,8 +150,13 @@ public:
       return StmtExprMutator::VisitStmt_(op);
     }
     // Clearing must precede the fold: folding builds stores without the field.
+    // Admission uses the same region scan Verify and Vectorize use, so a
+    // `T.Parallel` that holds explicit `tl.simd.*` calls is not mistaken for an
+    // automatic unit (the scan skips those loops; a plain "any Parallel loop"
+    // probe would fold inside them).
+    const pto::PtoRegionScan scan = pto::ScanPtoRegion(op->body);
     Stmt normalized =
-        HasParallelUnit(op->body) ? NormalizePredicates(op->body) : op->body;
+        scan.units.empty() ? op->body : NormalizePredicates(op->body);
     // No region-level gate: every rewrite below is gated on `in_parallel_`, so
     // a hand-written VMI region (SIMD_VF without a unit) stays untouched.
     bool saved = in_simd_vf_;
@@ -161,19 +169,8 @@ public:
     return block;
   }
 
-  static bool HasParallelUnit(const Stmt &body) {
-    bool found = false;
-    PostOrderVisit(body, [&found](const ObjectRef &node) {
-      if (const auto *loop = node.as<ForNode>()) {
-        if (loop->kind == ForKind::kParallel) {
-          found = true;
-        }
-      }
-    });
-    return found;
-  }
-
-  // Clears an access predicate that provably holds. Verify admitted the field
+  // Deliberately unused now that admission runs through the shared scan; kept
+  // out to avoid a second, divergent definition of "this region has a unit".  // Clears an access predicate that provably holds. Verify admitted the field
   // only when it is provably true, so anything else here means the two passes
   // disagree; that is reported instead of ignored, because dropping a
   // conditional access makes it unconditional. The judgment is the same helper
@@ -222,6 +219,39 @@ public:
         Stmt result = StmtExprMutator::VisitStmt_(op);
         LeaveScope(&saved);
         return result;
+      }
+      // The realize header (condition and iteration values) is evaluated in the
+      // enclosing scope, before the block variables exist. It is a predicate
+      // position like any other: a load there carries an access predicate that
+      // Verify admitted, so the same clearing has to reach it here.
+      Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+        // `predicate` is a plain PrimExpr here (never an Optional): a realize
+        // always carries one, defaulting to `const_true`.
+        const PrimExpr predicate = VisitExpr(op->predicate);
+        bool changed = !predicate.same_as(op->predicate);
+        Array<PrimExpr> iter_values;
+        for (const PrimExpr &value : op->iter_values) {
+          const PrimExpr rewritten = VisitExpr(value);
+          if (!rewritten.same_as(value)) {
+            changed = true;
+          }
+          iter_values.push_back(rewritten);
+        }
+        SBlock block = GetRef<SBlock>(op->block.get());
+        const Stmt body = VisitStmt(block->body);
+        if (!body.same_as(block->body)) {
+          block.CopyOnWrite()->body = body;
+          changed = true;
+        }
+        if (!changed) {
+          return GetRef<Stmt>(op);
+        }
+        SBlockRealize realize = GetRef<SBlockRealize>(op);
+        SBlockRealizeNode *node = realize.CopyOnWrite();
+        node->predicate = predicate;
+        node->iter_values = iter_values;
+        node->block = block;
+        return realize;
       }
       Stmt VisitStmt_(const BindNode *op) final {
         Stmt result = StmtExprMutator::VisitStmt_(op);
@@ -279,9 +309,11 @@ public:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    if (!in_simd_vf_ || op->kind != ForKind::kParallel) {
-      // An enclosing loop range is a fact a predicate inside a nested
-      // converting region may rest on; keep it for that region's normaliser.
+    if (!in_simd_vf_ || op->kind != ForKind::kParallel ||
+        pto::UsesExplicitSIMD(op->body)) {
+      // An explicit `tl.simd.*` nest is hand-written: Verify and Vectorize skip
+      // it, so Legalize must not fold conditionals inside it either. The loop
+      // range is still recorded for a nested converting region.
       outer_ranges_.push_back(
           {op->loop_var, Range::FromMinExtent(op->min, op->extent)});
       Stmt result = StmtExprMutator::VisitStmt_(op);
@@ -314,6 +346,121 @@ public:
     return result;
   }
 
+  // Folding evaluates both arms for every iteration of the unit, so a guard can
+  // no longer be what makes an arm safe to evaluate. Division and modulo by a
+  // value that may be zero are the operations where that matters: the source
+  // skips them while the guard is false, the fold does not.
+  bool ArmIsSafelyEvaluable(const Stmt &arm) {
+    bool safe = true;
+    PostOrderVisit(arm, [&](const ObjectRef &node) {
+      if (!safe) {
+        return;
+      }
+      const PrimExpr *divisor = nullptr;
+      if (const auto *div = node.as<DivNode>()) {
+        divisor = &div->b;
+      } else if (const auto *mod = node.as<ModNode>()) {
+        divisor = &mod->b;
+      }
+      if (divisor != nullptr &&
+          !predicate_analyzer_.CanProve(*divisor !=
+                                        IntImm(divisor->dtype(), 0))) {
+        safe = false;
+      }
+    });
+    return safe;
+  }
+
+  // A guard may be the only reason an access stays inside its buffer (a guard
+  // such as `i < 64` covering the first chunk of a two-chunk unit). The fold
+  // emits the store for every iteration, so an index range that can exceed the
+  // buffer makes the rewrite illegal. Only a *provable* overflow rejects the
+  // fold: a runtime offset remains the program's own contract, which is what
+  // the runtime-offset fold relies on.
+  bool DestinationMayLeaveBounds(const Stmt &arm) {
+    bool leaves = false;
+    PostOrderVisit(arm, [&](const ObjectRef &node) {
+      if (leaves) {
+        return;
+      }
+      if (const auto *store = node.as<BufferStoreNode>()) {
+        leaves = IndexRangeOutsideBuffer(store->buffer, store->indices);
+      }
+    });
+    return leaves;
+  }
+
+  bool IndexRangeOutsideBuffer(const Buffer &buffer,
+                               const Array<PrimExpr> &indices) {
+    if (indices.size() != buffer->shape.size()) {
+      return false;
+    }
+    int64_t extent = 1;
+    for (const PrimExpr &dim : buffer->shape) {
+      const auto *imm = dim.as<IntImmNode>();
+      if (imm == nullptr || extent > (int64_t{1} << 40)) {
+        return false; // dynamic shape: keep the program's contract
+      }
+      extent *= imm->value;
+    }
+    const Array<PrimExpr> offsets = buffer->ElemOffset(indices);
+    if (offsets.size() != 1) {
+      return false; // multi-axis physical layout: keep the contract
+    }
+    // A runtime symbol driving the offset is the program's contract. Pin every
+    // symbol whose range is int32-wide to zero, so its range cannot masquerade
+    // as a provable overflow: only the loop coordinates (tight ranges) may
+    // prove that the store leaves the buffer.
+    PrimExpr offset = offsets[0];
+    Map<Var, PrimExpr> pinned;
+    const int64_t kRuntimeBound = int64_t{1} << 20;
+    PostOrderVisit(offset, [&](const ObjectRef &node) {
+      const auto *var = node.as<VarNode>();
+      if (var == nullptr) {
+        return;
+      }
+      const arith::ConstIntBound var_bound =
+          predicate_analyzer_.const_int_bound(GetRef<Var>(var));
+      if (var_bound->min_value <= -kRuntimeBound ||
+          var_bound->max_value >= kRuntimeBound) {
+        pinned.Set(GetRef<Var>(var), IntImm(var->dtype, 0));
+      }
+    });
+    if (!pinned.empty()) {
+      offset = Substitute(offset, pinned);
+    }
+    const arith::ConstIntBound bound =
+        predicate_analyzer_.const_int_bound(offset);
+    // An unbounded or absurd bound means a runtime value drives the address (an
+    // int32 bound computation can also overflow into a finite value), which
+    // stays the program's own contract; only a sane, fully known range can
+    // prove an overflow.
+    const int64_t kBoundSanityLimit = int64_t{1} << 40;
+    if (bound->min_value == arith::ConstIntBound::kNegInf ||
+        bound->max_value == arith::ConstIntBound::kPosInf ||
+        bound->min_value <= -kBoundSanityLimit ||
+        bound->max_value >= kBoundSanityLimit) {
+      return false;
+    }
+    if (bound->min_value < 0) {
+      out_of_bounds_detail_ =
+          "buffer `" + std::string(buffer->name) + "` extent " +
+          std::to_string(extent) + ", index range [" +
+          std::to_string(bound->min_value) + ", " +
+          std::to_string(bound->max_value) + "]";
+      return true;
+    }
+    if (bound->max_value >= extent) {
+      out_of_bounds_detail_ =
+          "buffer `" + std::string(buffer->name) + "` extent " +
+          std::to_string(extent) + ", index range [" +
+          std::to_string(bound->min_value) + ", " +
+          std::to_string(bound->max_value) + "]";
+      return true;
+    }
+    return false;
+  }
+
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     if (!in_parallel_) {
       return StmtExprMutator::VisitStmt_(op);
@@ -324,6 +471,25 @@ public:
     Optional<Stmt> else_case;
     if (op->else_case.defined()) {
       else_case = VisitStmt(op->else_case.value());
+    }
+    // Folding evaluates both arms for every iteration, so an arm may only hold
+    // operations that are safe to evaluate even where its guard is false.
+    if (!ArmIsSafelyEvaluable(then_case) ||
+        (else_case.defined() && !ArmIsSafelyEvaluable(else_case.value()))) {
+      Fail("a conditional arm divides or takes a modulo by a divisor that is "
+           "not provably nonzero; folding would evaluate that arm "
+           "unconditionally, so keep the branch or make the divisor provably "
+           "nonzero");
+    }
+    // The same applies to memory: a guard is allowed to be the only thing
+    // keeping an access in bounds, and the fold drops it.
+    if (DestinationMayLeaveBounds(then_case) ||
+        (else_case.defined() &&
+         DestinationMayLeaveBounds(else_case.value()))) {
+      Fail("a guarded write's destination can fall outside the buffer for "
+           "iterations where the guard is false; folding would read back and "
+           "write that address unconditionally (" +
+           out_of_bounds_detail_ + ")");
     }
     // The condition travels into the value choices, so it needs the same
     // rewriting as the arms (Min/Max -> Select, infinity -> FloatImm).
@@ -380,7 +546,7 @@ public:
   // because A[1,i] and Av[0,i] can denote the same physical address. The
   // judgment is the same one Verify applies (pto::MayConflictStorage), so the
   // two passes cannot classify a pair differently.
-  bool MayConflict(const BufferNode *lhs_buffer, const BufferNode *rhs_buffer) {
+  bool MayConflict(const Buffer &lhs_buffer, const Buffer &rhs_buffer) {
     return pto::MayConflictStorage(lhs_buffer, rhs_buffer, storage_origins_);
   }
 
@@ -453,7 +619,7 @@ public:
         continue;
       }
       for (const LoadCollector::Location &load : condition_loads.loads) {
-        if (MayConflict(task.store->buffer.get(), load.buffer)) {
+        if (MayConflict(task.store->buffer, load.buffer)) {
           return true;
         }
       }
@@ -537,20 +703,20 @@ public:
                 });
               }
               if (seq[i].store != nullptr && seq[j].store != nullptr &&
-                  MayConflict(seq[i].store->buffer.get(),
-                              seq[j].store->buffer.get())) {
+                  MayConflict(seq[i].store->buffer,
+                              seq[j].store->buffer)) {
                 dep = true; // WAW
               }
               if (seq[i].store != nullptr) {
                 for (const LoadCollector::Location &load : reads_j) {
-                  if (MayConflict(seq[i].store->buffer.get(), load.buffer)) {
+                  if (MayConflict(seq[i].store->buffer, load.buffer)) {
                     dep = true; // earlier write, later read
                   }
                 }
               }
               if (seq[j].store != nullptr) {
                 for (const LoadCollector::Location &load : reads_i) {
-                  if (MayConflict(seq[j].store->buffer.get(), load.buffer)) {
+                  if (MayConflict(seq[j].store->buffer, load.buffer)) {
                     dep = true; // earlier read, later overwrite
                   }
                 }
@@ -615,6 +781,13 @@ public:
       return bound;
     };
 
+    // The exact search is exponential in the number of unpaired stores: a
+    // pathological arm (many independent then-only stores that the lower bound
+    // still hopes to pair) can enumerate a combinatorial number of states. Cap
+    // it and let the caller fall back to the identity order, which preserves
+    // each arm's sequence.
+    search_states_ = 0;
+    budget_exhausted_ = false;
     std::map<std::pair<TaskMask, TaskMask>, int> memo;
     std::function<int(const TaskMask &, const TaskMask &)> best_steps =
         [&](const TaskMask &done_t, const TaskMask &done_e) -> int {
@@ -625,6 +798,10 @@ public:
       const auto found = memo.find(key);
       if (found != memo.end()) {
         return found->second;
+      }
+      if (++search_states_ > kAlignmentSearchBudget) {
+        budget_exhausted_ = true;
+        return kUnreachableSteps;
       }
       const int lb = lower_bound(done_t, done_e);
       int best = 1 << 20;
@@ -678,6 +855,9 @@ public:
     TaskMask done_t(n);
     TaskMask done_e(m);
     while (done_t != full_t || done_e != full_e) {
+      if (budget_exhausted_) {
+        return false; // caller uses IdentityAlignment
+      }
       const int total = best_steps(done_t, done_e);
       bool emitted = false;
       // Prefer a pair: it keeps the position count minimal and avoids a
@@ -792,6 +972,13 @@ public:
   bool in_simd_vf_ = false;
   bool in_parallel_ = false;
   int condition_serial_ = 0;
+  // Exact alignment search guard rails (see AlignArmDestinations): the search is
+  // exponential, so it is capped and falls back to the identity order.
+  static constexpr int64_t kAlignmentSearchBudget = 200000;
+  static constexpr int kUnreachableSteps = 1 << 20;
+  std::string out_of_bounds_detail_;
+  int64_t search_states_ = 0;
+  bool budget_exhausted_ = false;
   // Storage origins: which data Vars are real allocations and which are
   // parameters, plus the parameter no-alias facts.
   pto::StorageOrigins storage_origins_;

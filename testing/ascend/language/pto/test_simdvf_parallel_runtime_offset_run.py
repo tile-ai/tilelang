@@ -28,8 +28,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.environ["TILELANG_DISABLE_DATA_RACE_CHECK"] = "1"
-
 import tilelang
 import tilelang.ascend.language as T
 
@@ -50,6 +48,25 @@ def _npu_available():
 
 _NPU = _npu_available()
 requires_npu = pytest.mark.skipif(not _NPU, reason="NPU runtime is unavailable")
+
+
+@contextlib.contextmanager
+def _without_data_race_check():
+    """Scope the race-check override to kernel compilation, then restore it.
+
+    Setting it at import time would leak into the whole pytest process (and
+    overwrite a caller's explicit value) even when every test is skipped.
+    """
+    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
+    saved = os.environ.get(key)
+    os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
 
 
 def _dev():
@@ -85,7 +102,8 @@ def _kernel():
     if _KERNEL[0] is None:
         # No `out_idx`: the kernel mixes a scalar parameter with buffers, and the
         # output index resolves through the buffer map. Y is written in place.
-        _KERNEL[0] = tilelang.compile(_build(), target="pto")
+        with _without_data_race_check():
+            _KERNEL[0] = tilelang.compile(_build(), target="pto")
     return _KERNEL[0]
 
 
@@ -129,16 +147,14 @@ def _mixed_input():
 @pytest.mark.parametrize("k", [0, 1, 4])
 def test_runtime_offset_window_is_written_per_lane(k):
     """Only the lanes whose condition holds write, at the shifted window."""
-    _run(_mixed_input(), k)
-
-
-@pytest.mark.pto
-@requires_npu
-def test_runtime_offset_keeps_the_false_lanes():
-    """A lane whose condition fails keeps its slot; a passing lane writes its own."""
     a = _mixed_input()
-    got = _run(a, 4)
-    # lane 0 is positive (1.0): it writes index 0 + 32
-    assert got[32] == np.float32(a[0]), "a passing lane must write its own slot"
-    # lane 1 is negative: its window slot stays at the initial value
-    assert got[33] == SENTINEL, "a failing lane must leave its slot untouched"
+    got = _run(a, k)
+    if k == 4:
+        # A passing lane writes its own slot; a failing lane keeps the initial
+        # value. Same launch as the comparison above, just the per-lane
+        # diagnostics for the widest window.
+        assert got[32] == np.float32(a[0]), "a passing lane must write its own slot"
+        assert got[33] == SENTINEL, "a failing lane must leave its slot untouched"
+
+
+

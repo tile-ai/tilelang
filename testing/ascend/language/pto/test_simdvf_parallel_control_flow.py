@@ -291,6 +291,32 @@ def _store_literals(store):
     return found
 
 
+def _select_then_value(store):
+    """The then arm of a folded store value.
+
+    Legalize emits `Select(condition, then_value, else_value)`, so the two arms
+    stay distinguishable after the branch is gone.
+    """
+    value = store.value
+    if isinstance(value, tvm.tirx.Select):
+        return value.true_value
+    return value
+
+
+def _expr_load_rows(expr, buffer):
+    """Leading indices of the loads from `buffer` inside an expression."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name == buffer:
+            index = node.indices[0] if node.indices else None
+            if isinstance(index, tvm.tirx.IntImm):
+                found.append(int(index))
+
+    tvm.tirx.stmt_functor.post_order_visit(expr, visit)
+    return found
+
+
 def _assert_war_keeps_the_entry_value(stores, buffer="y"):
     """The arm-local read of a row must be planned before the write that
     overwrites that row with the clobbering literal.
@@ -310,9 +336,16 @@ def _assert_war_keeps_the_entry_value(stores, buffer="y"):
         index = store.indices[0] if store.indices else None
         return int(index) if isinstance(index, tvm.tirx.IntImm) else None
 
-    read_back = [i for i, st in enumerate(stores) if row_of(st) != 0 and buffer in _expr_loads(st.value)]
+    # The read under test lives in the *then* arm of the nonzero-row store: an
+    # else-arm load, or a self-copy that reads the destination's own row, is a
+    # different access and must not satisfy this assertion.
+    read_back = [
+        i
+        for i, st in enumerate(stores)
+        if row_of(st) not in (0, None) and 0 in _expr_load_rows(_select_then_value(st), buffer)
+    ]
     clobber = [i for i, st in enumerate(stores) if row_of(st) == 0 and 1.0 in _store_literals(st)]
-    assert read_back, f"no store reads {buffer}[0], so the WAR case is not exercised"
+    assert read_back, f"the then arm never reads {buffer}[0], so the WAR case is not exercised"
     assert clobber, f"no store overwrites {buffer}[0] with the clobbering literal"
 
     assert min(read_back) < min(clobber), (
@@ -989,10 +1022,13 @@ def test_one_sided_branch_keeps_a_single_item_per_destination():
 # Conditional destination addresses
 #
 # A conditional store becomes one arm of a value choice, so Legalize pairs the
-# two arms by destination address. That only works for the canonical per-lane
-# form (leading indices constant, the T.Parallel variable last), and Verify
-# enforces it up front: the same shape restriction exists in Verify and Legalize
-# instead of failing late with a misleading pairing error.
+# two arms by destination address. That requires the address to be *continuous*
+# over the lanes (one contiguous run per chunk), not the narrower "constant
+# leading indices, T.Parallel variable last" form: the kept-row and
+# runtime-offset cases below are continuous and fold, while an interleaved or
+# lane-uniform destination is not. Verify enforces continuity up front so the
+# same restriction exists in Verify and Legalize instead of failing late with a
+# misleading pairing error.
 #
 # Plain (unconditional) stores keep the wider contract: any address the shared
 # analysis proves continuous is admitted, offsets included.
@@ -1070,10 +1106,11 @@ def test_plain_offset_destination_stays_supported():
 @pytest.mark.pto
 def test_2d_outer_vectorized_conditional_write_folds():
     """A one-sided conditional write in a 2D unit whose *outer* dimension is
-    the vectorized one. Verify accepts the canonical form (IntImm leading
-    indices, the vectorized variable last), so Legalize must fold the store
-    against the layout-selected lane variable -- not against the syntactically
-    innermost loop of the nest, which is the kept coordinate here."""
+    the vectorized one. Verify requires the address to be continuous over the
+    lanes (here a constant leading index plus the vectorized variable last), so
+    Legalize must fold the store against the layout-selected lane variable --
+    not against the syntactically innermost loop of the nest, which is the kept
+    coordinate here."""
 
     E, F, lanes = 128, 4, 64
 
@@ -1146,9 +1183,9 @@ def test_2d_inner_vectorized_conditional_write_still_folds():
 @pytest.mark.pto
 def test_conditional_offset_destination_folds():
     """A one-sided conditional write to a constant-offset destination
-    (`y[i + 8]`) folds like the canonical form: the offset keeps the access
-    per-lane continuous, the pairing and the pad read-back stay well-defined,
-    and the shifted window's 32-byte alignment is codegen legality's contract
+    (`y[i + 8]`) folds because the offset keeps the address continuous over the
+    lanes: the pairing and the pad read-back stay well-defined, and the shifted
+    window's 32-byte alignment is codegen legality's contract
     (VerifyPTOCodegenLegality), not the value-choice rewrite's."""
 
     E, lanes = 128, 64
@@ -2070,6 +2107,7 @@ def _k_region_level_bind(E=256, lanes=64):
 def test_region_level_bind_makes_a_predicate_provable():
     """A region-level scalar Bind is a fact for the predicate walk."""
     state = {}
+    injected = []
 
     def post(node):
         if isinstance(node, tvm.tirx.Bind) and node.value.dtype == tvm.DataType("bool"):
@@ -2085,6 +2123,7 @@ def test_region_level_bind_makes_a_predicate_provable():
             and "flag" in state
             and isinstance(node.indices[0], tvm.tirx.IntImm)
         ):
+            injected.append(node)
             return tvm.tirx.BufferStore(node.buffer, node.value, node.indices, predicate=state["flag"])
         return None
 
@@ -2092,6 +2131,11 @@ def test_region_level_bind_makes_a_predicate_provable():
     body = tvm.tirx.stmt_functor.ir_transform(func.body, None, post, ["tirx.Bind"])
     func = func.with_body(body)
     body = tvm.tirx.stmt_functor.ir_transform(func.body, None, post_store, ["tirx.BufferStore"])
+    # Without these the test would still pass when nothing was injected: the
+    # final assertion only says "no predicate is left", which also holds for a
+    # kernel that never had one.
+    assert "flag" in state, "the DSL must emit a bool tirx.Bind for flag"
+    assert injected, "the Bind-backed predicate was not injected into any store"
     stages, error = _lower_capture(func.with_body(body))
     assert error is None, f"a Bind-backed predicate must be admitted, got: {error}"
     predicated = [
