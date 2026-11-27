@@ -168,5 +168,131 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=512, block_M=128)
 
 
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_same_rank_dynamic_slice():
+    @T.prim_func
+    def main(X: T.Tensor((2, 4), T.float32), H: T.Tensor((1,), T.int32), Y: T.Tensor((4, 2), T.float32)):
+        with T.Kernel(1, threads=32):
+            Xs = T.alloc_shared((2, 4), T.float32)
+            Ts = T.alloc_shared((4, 2), T.float32)
+            T.copy(X, Xs)
+            T.fill(Ts, -1)
+            if H[0] == 4:
+                T.transpose(Xs, Ts[0 : H[0], 0:2])
+            T.copy(Ts, Y)
+
+    kernel = tilelang.compile(main, out_idx=[2])
+    x = torch.arange(8, dtype=torch.float32, device="cuda").reshape(2, 4)
+    h = torch.tensor([4], dtype=torch.int32, device="cuda")
+    torch.testing.assert_close(kernel(x, h), x.T, rtol=0, atol=0)
+    h.fill_(3)
+    torch.testing.assert_close(kernel(x, h), torch.full_like(x.T, -1), rtol=0, atol=0)
+
+    # Guarded dynamic slice must also compile when src is multi-buffered by T.Pipelined.
+    @T.prim_func
+    def pipelined_guarded(X: T.Tensor((4, 32, 64), T.float32), W: T.Tensor((1,), T.int32), Y: T.Tensor((64, 32), T.float32)):
+        with T.Kernel(1, threads=128):
+            Xs = T.alloc_shared((32, 64), T.float32)
+            Ts = T.alloc_shared((64, 32), T.float32)
+            Acc = T.alloc_fragment((64, 32), T.float32)
+            T.clear(Acc)
+            for t in T.Pipelined(4, num_stages=2):
+                T.copy(X[t, 0, 0], Xs)
+                T.fill(Ts, 0.0)
+                if W[0] == 64:
+                    T.transpose(Xs, Ts[0 : W[0], 0:32])
+                for i, j in T.Parallel(64, 32):
+                    Acc[i, j] += Ts[i, j]
+            T.copy(Acc, Y)
+
+    pkernel = tilelang.compile(
+        pipelined_guarded,
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    xp = torch.randint(-2, 3, (4, 32, 64), dtype=torch.int32).to(torch.float32).cuda()
+    w = torch.tensor([64], dtype=torch.int32, device="cuda")
+    torch.testing.assert_close(pkernel(xp, w), xp.transpose(1, 2).sum(dim=0), rtol=0, atol=0)
+    w.fill_(32)
+    torch.testing.assert_close(pkernel(xp, w), torch.zeros((64, 32), dtype=torch.float32, device="cuda"), rtol=0, atol=0)
+
+
+def _run_pipelined_transpose(H: int, W: int, disable_ws: bool):
+    steps = 4
+
+    @T.prim_func
+    def main(X: T.Tensor((steps, H, W), T.float32), Y: T.Tensor((W, H), T.float32)):
+        with T.Kernel(1, threads=128):
+            Xs = T.alloc_shared((H, W), T.float32)
+            Ts = T.alloc_shared((W, H), T.float32)
+            Acc = T.alloc_fragment((W, H), T.float32)
+            T.clear(Acc)
+            for t in T.Pipelined(steps, num_stages=2):
+                T.copy(X[t, 0, 0], Xs)
+                T.transpose(Xs, Ts)
+                for i, j in T.Parallel(W, H):
+                    Acc[i, j] += Ts[i, j]
+            T.copy(Acc, Y)
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True} if disable_ws else None
+    kernel = tilelang.compile(main, out_idx=[1], pass_configs=pass_configs)
+    x = torch.randint(-2, 3, (steps, H, W), dtype=torch.int32).to(torch.float32).cuda()
+    y = kernel(x)
+    torch.testing.assert_close(y, x.transpose(1, 2).sum(dim=0), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_pipelined():
+    """T.transpose with leading unit stage dim on src or dst."""
+    # Multi-buffered src (3D) -> unversioned dst (2D), non-square and unit-axis.
+    _run_pipelined_transpose(32, 64, disable_ws=True)
+    _run_pipelined_transpose(32, 64, disable_ws=False)
+    _run_pipelined_transpose(1, 32, disable_ws=True)
+
+    # Unversioned src (2D) -> sliced 3D dst with leading unit dim.
+    steps, H, W = 4, 32, 64
+
+    @T.prim_func
+    def dst_leading_unit(X: T.Tensor((steps, H, W), T.float32), Y: T.Tensor((W, H), T.float32)):
+        with T.Kernel(1, threads=128):
+            Xs = T.alloc_shared((H, W), T.float32)
+            Ts = T.alloc_shared((2, W, H), T.float32)
+            Acc = T.alloc_fragment((W, H), T.float32)
+            T.clear(Acc)
+            for t in T.serial(steps):
+                T.copy(X[t, 0, 0], Xs)
+                T.transpose(Xs, Ts[t % 2, 0:W, 0:H])
+                for i, j in T.Parallel(W, H):
+                    Acc[i, j] += Ts[t % 2, i, j]
+            T.copy(Acc, Y)
+
+    kernel = tilelang.compile(
+        dst_leading_unit,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    x = torch.randint(-2, 3, (steps, H, W), dtype=torch.int32).to(torch.float32).cuda()
+    torch.testing.assert_close(kernel(x), x.transpose(1, 2).sum(dim=0), rtol=0, atol=0)
+
+    # Mismatched transposed slice extents on different-rank operands must be rejected.
+    import pytest
+
+    @T.prim_func
+    def dst_mismatched_slice(X: T.Tensor((2, 4), T.float32), Y: T.Tensor((2, 4, 2), T.float32)):
+        with T.Kernel(1, threads=32):
+            Xs = T.alloc_shared((2, 4), T.float32)
+            Ts = T.alloc_shared((2, 4, 2), T.float32)
+            T.copy(X, Xs)
+            T.transpose(Xs, Ts[1, 0:1, 0:2])
+            T.copy(Ts, Y)
+
+    with pytest.raises(Exception, match="Transpose extent mismatch"):
+        tilelang.compile(
+            dst_mismatched_slice,
+            out_idx=[1],
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+        )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

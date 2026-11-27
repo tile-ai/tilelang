@@ -751,5 +751,144 @@ def test_scan_offset_subregion():
                 run_scan_offset_subregion(H, W, 64, 128, op=op, dim=dim, reverse=reverse)
 
 
+def _run_pipelined_multibuffered_scan_2d(
+    op: str, H: int, W: int, dim: int, reverse: bool, disable_ws: bool, both_multibuffered: bool = False
+):
+    steps = 4
+    scan_fn = T.cumsum if op == "cumsum" else T.cummax
+    num_stages = 0 if both_multibuffered else 2
+    order = [0, 1, 2] if both_multibuffered else None
+    stage = [0, 1, 2] if both_multibuffered else None
+
+    @T.prim_func
+    def kernel(X: T.Tensor((steps, H, W), T.float32), Y: T.Tensor((H, W), T.float32)):
+        with T.Kernel(1, threads=128):
+            Xs = T.alloc_shared((H, W), T.float32)
+            Cs = T.alloc_shared((H, W), T.float32)
+            Acc = T.alloc_fragment((H, W), T.float32)
+            T.clear(Acc)
+            for t in T.Pipelined(steps, num_stages=num_stages, order=order, stage=stage):
+                T.copy(X[t, 0, 0], Xs)
+                scan_fn(Xs, Cs, dim=dim, reverse=reverse)
+                for i, j in T.Parallel(H, W):
+                    Acc[i, j] += Cs[i, j]
+            T.copy(Acc, Y)
+
+    pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True} if disable_ws else None
+    compiled = tl.compile(kernel, out_idx=[1], pass_configs=pass_configs)
+    X = torch.randint(-2, 3, (steps, H, W), dtype=torch.int32).to(torch.float32).cuda()
+    out = compiled(X)
+    if op == "cumsum":
+        ref_slices = torch.flip(torch.flip(X, dims=[dim + 1]).cumsum(dim=dim + 1), dims=[dim + 1]) if reverse else X.cumsum(dim=dim + 1)
+    else:
+        ref_slices = _torch_cummax(X, dim + 1, reverse)
+    torch.testing.assert_close(out, ref_slices.sum(dim=0), rtol=0, atol=0)
+
+
+def _run_pipelined_multibuffered_scan_1d(op: str, N: int, disable_ws: bool):
+    steps = 4
+    scan_fn = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def kernel(X: T.Tensor((steps, N), T.float32), Y: T.Tensor((N,), T.float32)):
+        with T.Kernel(1, threads=128):
+            Xs = T.alloc_shared((N,), T.float32)
+            Cs = T.alloc_shared((N,), T.float32)
+            Acc = T.alloc_fragment((N,), T.float32)
+            T.clear(Acc)
+            for t in T.Pipelined(steps, num_stages=2):
+                T.copy(X[t, 0], Xs)
+                scan_fn(Xs, Cs, dim=0, reverse=False)
+                for i in T.Parallel(N):
+                    Acc[i] += Cs[i]
+            T.copy(Acc, Y)
+
+    pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True} if disable_ws else None
+    compiled = tl.compile(kernel, out_idx=[1], pass_configs=pass_configs)
+    X = torch.randint(-2, 3, (steps, N), dtype=torch.int32).to(torch.float32).cuda()
+    out = compiled(X)
+    ref_slices = X.cumsum(dim=1) if op == "cumsum" else _torch_cummax(X, 1, False)
+    torch.testing.assert_close(out, ref_slices.sum(dim=0), rtol=0, atol=0)
+
+
+def test_scan_pipelined_multibuffered_shared():
+    """Scan ops on multi-buffered shared regions inside T.Pipelined(num_stages>=2)."""
+    # 2D out-of-place: src is 3D multi-buffered, dst stays 2D.
+    _run_pipelined_multibuffered_scan_2d("cumsum", 32, 64, dim=1, reverse=False, disable_ws=True)
+    _run_pipelined_multibuffered_scan_2d("cummax", 32, 64, dim=0, reverse=True, disable_ws=False)
+    # Single-row 2D (1, 64): dim=0 stays identity and dim=1 scans columns.
+    _run_pipelined_multibuffered_scan_2d("cumsum", 1, 64, dim=0, reverse=False, disable_ws=True)
+    _run_pipelined_multibuffered_scan_2d("cummax", 1, 64, dim=1, reverse=False, disable_ws=True)
+    # 1D multi-buffered: scan the logical vector.
+    _run_pipelined_multibuffered_scan_1d("cumsum", 64, disable_ws=True)
+    _run_pipelined_multibuffered_scan_1d("cummax", 64, disable_ws=False)
+    # 3-stage pipeline: both src and dst regions carry prepended stage dims.
+    _run_pipelined_multibuffered_scan_2d("cumsum", 32, 64, dim=1, reverse=False, disable_ws=True, both_multibuffered=True)
+
+
+@pytest.mark.parametrize("op_key", ["tl.tileop.cumsum", "tl.tileop.cummax"])
+def test_scan_unannotated_single_row_slice_and_conflicting_annotation(op_key):
+    """Unannotated 2D single-row slice keeps rank 2; conflicting logical_ndim is rejected."""
+    from tilelang.utils.language import to_tile_region
+
+    @T.prim_func
+    def unannotated_row_slice(A: T.Tensor((2, 64), T.float32), B: T.Tensor((64,), T.float32)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((2, 64), T.float32)
+            T.copy(A, S)
+            T.call_intrin(
+                "handle",
+                tvm.tirx.op.Op.get(op_key),
+                to_tile_region(S[1:2, 0:64], access_type="r"),
+                to_tile_region(S[1:2, 0:64], access_type="w"),
+                0,
+                False,
+            )
+            for j in T.Parallel(64):
+                B[j] = S[1, j]
+
+    compiled = tl.compile(unannotated_row_slice, out_idx=[1])
+    x = torch.arange(128, 0, -1, dtype=torch.float32, device="cuda").reshape(2, 64)
+    # Scanning a single-row 2D slice along dim=0 must return the row unchanged.
+    torch.testing.assert_close(compiled(x), x[1], rtol=0, atol=0)
+
+    scan_fn = T.cumsum if op_key == "tl.tileop.cumsum" else T.cummax
+    with pytest.raises(ValueError, match="logical_ndim"):
+
+        @T.prim_func
+        def bad_annotation(A: T.Tensor((1, 64), T.float32)):
+            with T.Kernel(1, threads=128):
+                S = T.alloc_shared((1, 64), T.float32)
+                T.copy(A, S)
+                scan_fn(S, dim=0, annotations={"logical_ndim": 1})
+
+    # Runtime-guarded dynamic destination slice in direct TIR must still compile.
+    @T.prim_func
+    def guarded_dynamic_dst(A: T.Tensor((4,), T.float32), W: T.Tensor((1,), T.int32), B: T.Tensor((4,), T.float32)):
+        with T.Kernel(1, threads=32):
+            Xs = T.alloc_shared((4,), T.float32)
+            Cs = T.alloc_shared((4,), T.float32)
+            T.copy(A, Xs)
+            T.fill(Cs, -1.0)
+            if W[0] == 4:
+                T.call_intrin(
+                    "handle",
+                    tvm.tirx.op.Op.get(op_key),
+                    to_tile_region(Xs, access_type="r"),
+                    to_tile_region(Cs[0 : W[0]], access_type="w"),
+                    0,
+                    False,
+                )
+            T.copy(Cs, B)
+
+    guarded_compiled = tl.compile(guarded_dynamic_dst, out_idx=[2])
+    a4 = torch.tensor([3.0, 1.0, 4.0, 2.0], dtype=torch.float32, device="cuda")
+    w = torch.tensor([4], dtype=torch.int32, device="cuda")
+    expected4 = a4.cumsum(dim=0) if op_key == "tl.tileop.cumsum" else a4.cummax(dim=0).values
+    torch.testing.assert_close(guarded_compiled(a4, w), expected4, rtol=0, atol=0)
+    w.fill_(3)
+    torch.testing.assert_close(guarded_compiled(a4, w), torch.full_like(a4, -1.0), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

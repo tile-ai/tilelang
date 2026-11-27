@@ -53,6 +53,7 @@ const Impl &ResolveScanImpl(Target target, const char *op_name) {
 
 template <typename ScanOpNode>
 void InitScanOpNode(ScanOpNode *node, const Array<PrimExpr> &args,
+                    const Map<String, ObjectRef> &annotations,
                     const char *op_name) {
   ICHECK_EQ(args.size(), 4);
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -64,10 +65,20 @@ void InitScanOpNode(ScanOpNode *node, const Array<PrimExpr> &args,
   node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;
   node->reverse = args[3].as<Bool>().value();
-  ICHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
-      << "The dim of " << op_name
-      << " should be less than the number of dimensions. Got dim=" << node->dim
-      << ", but src has " << node->src->shape.size() << " dims.";
+  if (auto opt = annotations.Get("logical_ndim")) {
+    const auto *int_val = opt.value().as<IntImmNode>();
+    ICHECK(int_val) << op_name << " logical_ndim annotation must be IntImm";
+    node->logical_ndim = static_cast<int>(int_val->value);
+    ICHECK_GE(node->logical_ndim, 1)
+        << op_name << " logical_ndim must be >= 1, got " << node->logical_ndim;
+  }
+  int check_ndim = node->logical_ndim > 0
+                       ? node->logical_ndim
+                       : static_cast<int>(node->src->shape.size());
+  ICHECK(node->dim >= 0 && node->dim < check_ndim)
+      << "The dim of " << op_name << " should be in [0, " << check_ndim
+      << "). Got dim=" << node->dim << ", src shape=" << node->src->shape
+      << ".";
 }
 
 template <typename ScanOpNode>
@@ -134,7 +145,7 @@ TileOperator CumMaxOpNode::Clone() const {
 
 CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
-  InitScanOpNode(node.get(), args, "cumsum");
+  InitScanOpNode(node.get(), args, annotations, "cumsum");
   data_ = std::move(node);
 }
 
@@ -156,7 +167,7 @@ TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
 
 CumMaxOp::CumMaxOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CumMaxOpNode> node = make_object<CumMaxOpNode>();
-  InitScanOpNode(node.get(), args, "cummax");
+  InitScanOpNode(node.get(), args, annotations, "cummax");
   data_ = std::move(node);
 }
 

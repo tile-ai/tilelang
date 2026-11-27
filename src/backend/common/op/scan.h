@@ -11,10 +11,11 @@
 
 #include "op/utils.h"
 
+#include <sstream>
+
+#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
-
-#include <sstream>
 
 namespace tvm {
 namespace tl {
@@ -26,9 +27,64 @@ using namespace ffi;
 namespace scan {
 
 template <typename ScanOpNode>
+Array<PrimExpr> ResolveScanExtents(const ScanOpNode &op,
+                                   arith::Analyzer *analyzer,
+                                   const char *pretty_name) {
+  arith::Analyzer local_analyzer;
+  if (analyzer == nullptr) {
+    analyzer = &local_analyzer;
+  }
+
+  const Array<Range> &src_ranges = op.srcRegion_->region;
+  const Array<Range> &dst_ranges = op.dstRegion_->region;
+  const int src_rank = static_cast<int>(src_ranges.size());
+  const int dst_rank = static_cast<int>(dst_ranges.size());
+
+  int logical_ndim = op.logical_ndim > 0 ? op.logical_ndim : src_rank;
+  ICHECK_GE(src_rank, logical_ndim)
+      << pretty_name << " source region rank (" << src_rank
+      << ") is smaller than logical_ndim (" << logical_ndim << ").";
+  const int src_lead = src_rank - logical_ndim;
+  for (int i = 0; i < src_lead; ++i) {
+    ICHECK(is_one(src_ranges[i]->extent))
+        << pretty_name << " source has non-unit leading dimension at axis " << i
+        << " (extent=" << src_ranges[i]->extent
+        << ") before logical_ndim=" << logical_ndim
+        << ", src_region=" << src_ranges;
+  }
+
+  ICHECK_GE(dst_rank, logical_ndim)
+      << pretty_name << " destination region rank (" << dst_rank
+      << ") is smaller than logical_ndim (" << logical_ndim << ").";
+  const int dst_lead = dst_rank - logical_ndim;
+  for (int i = 0; i < dst_lead; ++i) {
+    ICHECK(is_one(dst_ranges[i]->extent))
+        << pretty_name << " destination has non-unit leading dimension at axis "
+        << i << " (extent=" << dst_ranges[i]->extent
+        << ") before logical_ndim=" << logical_ndim
+        << ", dst_region=" << dst_ranges;
+  }
+
+  Array<PrimExpr> extents;
+  extents.reserve(logical_ndim);
+  for (int i = 0; i < logical_ndim; ++i) {
+    const PrimExpr &src_ext = src_ranges[src_lead + i]->extent;
+    const PrimExpr &dst_ext = dst_ranges[dst_lead + i]->extent;
+    // Only reject provably mismatched extents so runtime-guarded dynamic slices
+    // remain legal.
+    ICHECK(!analyzer->CanProve(src_ext != dst_ext))
+        << pretty_name << " source and destination extent mismatch at logical "
+        << "axis " << i << ": src=" << src_ext << ", dst=" << dst_ext;
+    extents.push_back(src_ext);
+  }
+  return extents;
+}
+
+template <typename ScanOpNode>
 Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
-                     const char *op_name, const char *pretty_name,
-                     const char *symbol_prefix, const char *scan_noun) {
+                     arith::Analyzer *analyzer, const char *op_name,
+                     const char *pretty_name, const char *symbol_prefix,
+                     const char *scan_noun) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
     LOG(FATAL) << pretty_name
                << " for fragment not implemented, please raise an issue if "
@@ -43,10 +99,7 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
     PrimExpr dst_ptr = MakeAccessPtrFromRegion(op.dstRegion_, 2);
 
-    Array<PrimExpr> src_extents;
-    for (const auto &range : op.srcRegion_->region) {
-      src_extents.push_back(range->extent);
-    }
+    Array<PrimExpr> src_extents = ResolveScanExtents(op, analyzer, pretty_name);
     int ndim = static_cast<int>(src_extents.size());
 
     if (ndim == 1) {
@@ -79,14 +132,14 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
 }
 
 inline Stmt LowerCumSum(const CumSumOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
-  return LowerSharedScan(op, lower_args, "cumsum", "CumSum", "CumSum",
+                        arith::Analyzer *analyzer) {
+  return LowerSharedScan(op, lower_args, analyzer, "cumsum", "CumSum", "CumSum",
                          "Cumulative sum");
 }
 
 inline Stmt LowerCumMax(const CumMaxOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
-  return LowerSharedScan(op, lower_args, "cummax", "CumMax", "CumMax",
+                        arith::Analyzer *analyzer) {
+  return LowerSharedScan(op, lower_args, analyzer, "cummax", "CumMax", "CumMax",
                          "Cumulative maximum");
 }
 
