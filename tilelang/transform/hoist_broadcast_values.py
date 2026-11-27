@@ -19,6 +19,29 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         super().__init__()
         self.pending_defs = []
         self.hoist_enabled = False
+        self.var_remap = {}
+
+    def visit_var_(self, op):
+        return self.var_remap.get(op, op)
+
+    def visit_let_(self, op):
+        # Hoisting can give repeated occurrences of a shared Let different
+        # values. Freshen its binder to keep those bindings independent.
+        value = self.visit_expr(op.value)
+        if isinstance(op.var, tirx.SizeVar):
+            var = tirx.SizeVar(op.var.name, op.var.dtype, op.var.span)
+        else:
+            var = Var(op.var.name, op.var.type_annotation, op.var.span)
+        previous = self.var_remap.get(op.var)
+        self.var_remap[op.var] = var
+        try:
+            body = self.visit_expr(op.body)
+        finally:
+            if previous is None:
+                del self.var_remap[op.var]
+            else:
+                self.var_remap[op.var] = previous
+        return tirx.Let(var, value, body, op.span)
 
     def visit_broadcast_(self, op):
         if self.hoist_enabled and isinstance(op.value, (tirx.IntImm, tirx.FloatImm)):

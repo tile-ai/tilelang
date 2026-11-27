@@ -64,6 +64,20 @@ def _check(original, transformed):
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
+@tilelang.testing.requires_cuda
+def test_hoist_nested_floordiv():
+    @T.prim_func
+    def main(X: T.Tensor((64,), T.int16), O: T.Tensor((64,), T.int16)):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(64):
+                O[i] = T.floordiv(T.floordiv(X[i], T.int16(-2)), T.int16(4))
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    x = torch.arange(-32, 32, device="cuda", dtype=torch.int16)
+    expected = torch.div(torch.div(x, -2, rounding_mode="floor"), 4, rounding_mode="floor")
+    torch.testing.assert_close(kernel(x), expected, rtol=0, atol=0)
+
+
 def test_transform_hoist():
     @T.prim_func
     def before():
