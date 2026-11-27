@@ -88,6 +88,40 @@ def test_ascend_simd_vexpdif_codegen():
     assert "simd_inst::vexpdif<" not in source
 
 
+def test_pipe_v_barrier_intrinsic_codegen():
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), "float32")):
+        with T.Kernel(1):
+            T.ascend_pipe_barrier("PIPE_V")
+            A[0] = T.float32(1)
+
+    source = lower(kernel, target="ascend").kernel_source
+    assert "asc_sync_pipe(PIPE_V);" in source
+
+
+@pytest.mark.parametrize(
+    "pipe,instruction",
+    [
+        ("PIPE_M", "asc_sync_pipe(PIPE_M);"),
+        ("PIPE_MTE1", "asc_sync_pipe(PIPE_MTE1);"),
+        ("PIPE_MTE2", "asc_sync_pipe(PIPE_MTE2);"),
+        ("PIPE_MTE3", "asc_sync_pipe(PIPE_MTE3);"),
+        ("PIPE_FIX", "asc_sync_pipe(PIPE_FIX);"),
+        ("PIPE_S", "asc_sync();"),
+        ("PIPE_ALL", "asc_sync();"),
+    ],
+)
+def test_pipe_barrier_intrinsic_codegen(pipe, instruction):
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), "float32")):
+        with T.Kernel(1):
+            T.ascend_pipe_barrier(pipe)
+            A[0] = T.float32(1)
+
+    source = lower(kernel, target="ascend").kernel_source
+    assert instruction in source
+
+
 def test_manual_sync_intrinsic_codegen():
     @T.prim_func
     def kernel(A: T.Tensor((1,), "float32"), flag: T.int32):
