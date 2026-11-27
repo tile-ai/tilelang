@@ -12,6 +12,16 @@ _CUMSUM_OP_KEY = "tl.tileop.cumsum"
 _CUMMAX_OP_KEY = "tl.tileop.cummax"
 
 
+def _prepare_scan_annotations(annotations: dict | None, logical_ndim: int) -> dict:
+    ann = _normalize_annotations(annotations)
+    if "logical_ndim" in ann:
+        existing = ann["logical_ndim"]
+        if isinstance(existing, bool) or not isinstance(existing, (int, tirx.IntImm)) or int(existing) != int(logical_ndim):
+            raise ValueError(f"scan logical_ndim annotation ({existing}) must match input rank ({logical_ndim})")
+    ann["logical_ndim"] = int(logical_ndim)
+    return ann
+
+
 @macro
 def _scan_fragment(
     src: BufferLikeType,
@@ -36,7 +46,7 @@ def _scan_fragment(
         to_tile_region(scan_smem, access_type="w"),
         dim,
         reverse,
-        annotations=_normalize_annotations(annotations),
+        annotations=_prepare_scan_annotations(annotations, len(src_shape)),
     )
     copy(scan_smem, dst)
 
@@ -148,7 +158,7 @@ def cumsum(
         to_tile_region(dst, access_type="w"),
         dim,
         reverse,
-        annotations=_normalize_annotations(annotations),
+        annotations=_prepare_scan_annotations(annotations, len(retrieve_shape(src))),
     )
 
 
@@ -201,5 +211,5 @@ def cummax(
         to_tile_region(dst, access_type="w"),
         dim,
         reverse,
-        annotations=_normalize_annotations(annotations),
+        annotations=_prepare_scan_annotations(annotations, len(retrieve_shape(src))),
     )

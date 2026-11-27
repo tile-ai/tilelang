@@ -14,6 +14,7 @@
 
 #include "utils.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace tvm {
@@ -119,12 +120,19 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
 
   if (src_dst == 1) {
-    ICHECK_EQ(src_range.size(), ranges.size())
-        << "Transpose source and destination ranks must match";
+    // Multi-buffered pipeline stages may prepend leading unit dimensions to
+    // src_range and/or dst_range independently; align from the trailing axes.
+    const size_t common_rank = std::min(src_range.size(), ranges.size());
+    const size_t src_lead = src_range.size() - common_rank;
+    const size_t dst_lead = ranges.size() - common_rank;
     std::vector<int> source_axis_to_iv =
         MakeSourceAxisToIterVarMap(src_range, ivs.size());
-    for (size_t dst_axis = 0; dst_axis < ranges.size(); dst_axis++) {
-      size_t src_axis = SourceAxisForDestinationAxis(dst_axis, ranges.size());
+    for (size_t dst_axis = 0; dst_axis < dst_lead; dst_axis++) {
+      indices.push_back(ranges[dst_axis]->min);
+    }
+    for (size_t k = 0; k < common_rank; k++) {
+      size_t dst_axis = dst_lead + k;
+      size_t src_axis = src_lead + SourceAxisForDestinationAxis(k, common_rank);
       int iv_idx = source_axis_to_iv[src_axis];
       if (iv_idx < 0)
         indices.push_back(ranges[dst_axis]->min);
@@ -180,6 +188,46 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
+
+  // Same-rank slices can have dynamic extents established by a runtime guard.
+  if (src_range.size() != dst_range.size()) {
+    ICHECK_GE(src_range.size(), 2)
+        << "Transpose source must have at least two dimensions, got "
+        << src_range.size();
+    ICHECK_GE(dst_range.size(), 2)
+        << "Transpose destination must have at least two dimensions, got "
+        << dst_range.size();
+    const size_t common_rank = std::min(src_range.size(), dst_range.size());
+    const size_t src_lead = src_range.size() - common_rank;
+    const size_t dst_lead = dst_range.size() - common_rank;
+    for (size_t i = 0; i < src_lead; i++) {
+      ICHECK(is_one(src_range[i]->extent))
+          << "Transpose source has non-unit extra leading dimension at axis "
+          << i << " (extent=" << src_range[i]->extent
+          << "): src_range=" << src_range << ", dst_range=" << dst_range;
+    }
+    for (size_t i = 0; i < dst_lead; i++) {
+      ICHECK(is_one(dst_range[i]->extent))
+          << "Transpose destination has non-unit extra leading dimension at "
+             "axis "
+          << i << " (extent=" << dst_range[i]->extent
+          << "): src_range=" << src_range << ", dst_range=" << dst_range;
+    }
+    for (size_t k = 0; k < common_rank; k++) {
+      const size_t src_axis =
+          src_lead + SourceAxisForDestinationAxis(k, common_rank);
+      const size_t dst_axis = dst_lead + k;
+      // Only reject provably mismatched extents so runtime-guarded dynamic
+      // slices remain legal.
+      ICHECK(!analyzer->CanProve(src_range[src_axis]->extent !=
+                                 dst_range[dst_axis]->extent))
+          << "Transpose extent mismatch at aligned axis " << k << ": src axis "
+          << src_axis << " has extent " << src_range[src_axis]->extent
+          << ", dst axis " << dst_axis << " has extent "
+          << dst_range[dst_axis]->extent << " (src_range=" << src_range
+          << ", dst_range=" << dst_range << ")";
+    }
+  }
 
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
