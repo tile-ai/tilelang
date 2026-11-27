@@ -682,26 +682,25 @@ public:
     return scalar_def_to_stmt;
   }
 
+  bool HasBufferDependency(const PipelineStageInfo &writer,
+                           const PipelineStageInfo &reader) const {
+    for (const BufferRegion &write : writer.writes) {
+      for (const BufferRegion &read : reader.reads) {
+        if (PipelineRegionsMayConflict(write, read, thread_domains_)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   std::vector<int> FindBufferProducerIndices(
       int consumer_idx,
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     std::vector<int> producer_indices;
     const auto &consumer = pipeline_stage_infos[consumer_idx];
     for (int producer_idx = 0; producer_idx < consumer_idx; ++producer_idx) {
-      const auto &producer = pipeline_stage_infos[producer_idx];
-      bool conflicts = false;
-      for (const BufferRegion &write : producer.writes) {
-        for (const BufferRegion &read : consumer.reads) {
-          if (PipelineRegionsMayConflict(write, read, thread_domains_)) {
-            conflicts = true;
-            break;
-          }
-        }
-        if (conflicts) {
-          break;
-        }
-      }
-      if (conflicts) {
+      if (HasBufferDependency(pipeline_stage_infos[producer_idx], consumer)) {
         producer_indices.push_back(producer_idx);
       }
     }
@@ -733,9 +732,25 @@ public:
         pipeline_stage_infos->size());
     std::deque<std::pair<int, int>> worklist;
 
+    // A later write may supply an operand of the next iteration's copy.
+    auto has_loop_carried_read = [&](int reader_idx) {
+      return std::any_of(pipeline_stage_infos->begin() + reader_idx + 1,
+                         pipeline_stage_infos->end(),
+                         [&](const PipelineStageInfo &writer) {
+                           return HasBufferDependency(
+                               writer, (*pipeline_stage_infos)[reader_idx]);
+                         });
+    };
+
     for (int i = 0; i < static_cast<int>(pipeline_stage_infos->size()); ++i) {
       const auto &pinfo = (*pipeline_stage_infos)[i];
-      if (pinfo.IsCopyStage() && pinfo.IsLastUseStmtIndexValid()) {
+      if (!pinfo.IsCopyStage()) {
+        continue;
+      }
+      if (has_loop_carried_read(i)) {
+        return false;
+      }
+      if (pinfo.IsLastUseStmtIndexValid()) {
         anchor_candidates[i].insert(pinfo.last_use_stmt_index);
         worklist.emplace_back(i, pinfo.last_use_stmt_index);
       }
@@ -746,6 +761,10 @@ public:
       if (producer.IsTmaCopy()) {
         // A stage-0 consumer needs an explicit wait that this schedule cannot
         // insert. Let the ordinary sequential lowering provide that wait.
+        return false;
+      }
+      if (anchor_candidates[producer_idx].empty() &&
+          has_loop_carried_read(producer_idx)) {
         return false;
       }
       if (!producer.IsCopyStage()) {
