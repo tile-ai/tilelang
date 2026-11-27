@@ -29,12 +29,17 @@ def matmul_warp_specialize_copy_gemm_0_1(A, B, block_M, block_N, block_K, dtype=
 
         for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
             T.copy(A[by * block_M, ko * block_K], A_shared)
+            # A_shared is filled by all 256 threads but read inside the warp-group regions below,
+            # where the inserted barrier covers only one group. Order the fill against both readers.
+            T.sync_threads()
             with T.ws(1):
                 T.copy(B[ko * block_K, bx * block_N], B_shared_g1)
                 T.gemm(A_shared, B_shared_g1, C_local_g1)
             with T.ws(0):
                 T.copy(B[ko * block_K, bx * block_N + block_N // warp_group_num], B_shared_g0)
                 T.gemm(A_shared, B_shared_g0, C_local_g0)
+            # Keep the next iteration's fill from overwriting a tile the other group is still reading.
+            T.sync_threads()
 
         with T.ws(1):
             T.copy(C_local_g1, C[by * block_M, bx * block_N])
