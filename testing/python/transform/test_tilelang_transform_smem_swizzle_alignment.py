@@ -90,6 +90,7 @@ def test_tma_swizzled_smem_uses_swizzle_period_alignment(dtype, columns, require
     # for the generic TMA requirement, but not enough for any swizzle period.
     kernel = _compile_kernel(MISALIGNING_PAD_ELEMS, dtype, columns)
     source = kernel.get_kernel_source()
+    assert f"extern __shared__ __align__({required_alignment})" in source
     pad_offset = _dynamic_smem_offset(source, "pad")
     smem_offset = _dynamic_smem_offset(source, "smem")
 
