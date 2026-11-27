@@ -270,9 +270,6 @@ cmake --build /tmp/build-gtest -j"$(nproc)"
 cp -v /tmp/build-gtest/lib/*.a /usr/lib/x86_64-linux-gnu/
 rm -rf /tmp/build-gtest
 
-# Keep setuptools < 80 (compat with some base images)
-pip install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core
-
 # Locate ROCm llvm-config (install LLVM 18 if missing)
 LLVM_CONFIG_PATH=""
 for p in /opt/rocm/llvm/bin/llvm-config /opt/rocm/llvm-*/bin/llvm-config /opt/rocm-*/llvm*/bin/llvm-config; do
@@ -292,13 +289,17 @@ fi
 export LLVM_CONFIG="$LLVM_CONFIG_PATH"
 export PATH="$(dirname "$LLVM_CONFIG"):/usr/local/bin:${PATH}"
 
+# Keep setuptools < 80 (compat with some base images)
+pip install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core
+
 # Optional shim for tools that expect llvm-config-16
 mkdir -p /usr/local/bin
 printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16
 chmod +x /usr/local/bin/llvm-config-16
 
-# TVM Python bits need Cython (for system Python used by the build)
-pip install --no-cache-dir "cython>=0.29.36,<3.0"
+# Install TileLang's Python build requirements before disabling build isolation.
+pip install --no-cache-dir "cython>=3.1.0" \
+  "z3-solver>=4.13.0,<4.15.5" "patchelf>=0.17.2"
 
 # Clone + build TileLang (ROCm)
 # Default location: /opt/tilelang (adjust if you prefer a different path).
@@ -313,7 +314,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.11,<0.1.13" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi>=0.1.11,<0.1.13"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
