@@ -12,6 +12,59 @@ _SM89_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
 _SM90_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
 
 
+@pytest.mark.parametrize("access", ["load", "store"])
+@pytest.mark.parametrize("alignment,offset,width", [(4, 0, 1), (8, 0, 2), (16, 0, 4), (16, 1, 1)])
+def test_vectorize_buffer_base_alignment(access, alignment, offset, width):
+    @T.prim_func
+    def main(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (8,), "float32", align=alignment if access == "load" else 16)
+        B = T.match_buffer(b, (8,), "float32", align=alignment if access == "store" else 16)
+        for i in T.vectorized(4):
+            B[i + (offset if access == "store" else 0)] = A[i + (offset if access == "load" else 0)] + 1.0
+
+    planned = _run_vectorized_loop_legalizer(main)
+    assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
+
+
+def test_vectorize_scalar_broadcast_with_weak_alignment():
+    @T.prim_func
+    def main(a: T.handle, B: T.Tensor((4,), "float32")):
+        A = T.match_buffer(a, (4,), "float32", align=4)
+        for i in T.vectorized(4):
+            B[i] = A[0] + 1.0
+
+    planned = _run_vectorized_loop_legalizer(main)
+    assert _vectorized_extents(planned["main"]) == [4]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("access", ["load", "store"])
+@pytest.mark.parametrize("alignment", [4, 8, 16])
+def test_vectorize_buffer_base_alignment_runtime(access, alignment):
+    import torch
+
+    @T.prim_func
+    def main(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (512,), "float32", align=alignment if access == "load" else 16)
+        B = T.match_buffer(b, (512,), "float32", align=alignment if access == "store" else 16)
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(512):
+                B[i] = A[i] + 1.0
+
+    kernel = tl.compile(main, target="cuda", execution_backend="nvrtc")
+    offset = alignment // 4
+    a = torch.arange(512 + offset, device="cuda", dtype=torch.float32)
+    b = torch.empty(512 + offset, device="cuda", dtype=torch.float32)
+    a = a[offset:] if access == "load" else a[:512]
+    b = b[offset:] if access == "store" else b[:512]
+    pointer = a.data_ptr() if access == "load" else b.data_ptr()
+    assert pointer % 16 == alignment % 16
+    expected = a + 1
+    kernel(a, b)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(b, expected)
+
+
 def _run_layout_inference(func):
     mod = tvm.IRModule({"main": func})
     with _TARGET:
