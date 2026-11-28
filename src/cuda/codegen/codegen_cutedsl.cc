@@ -14,6 +14,7 @@
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -37,6 +38,35 @@ bool HasStatefulBooleanBranch(const PrimExpr &true_value,
          false_value.dtype() == DataType::Bool() &&
          (tirx::SideEffect(true_value) > tirx::CallEffectKind::kReadState ||
           tirx::SideEffect(false_value) > tirx::CallEffectKind::kReadState);
+}
+
+bool ContainsStatefulBooleanConditional(const PrimExpr &expr) {
+  if (tirx::SideEffect(expr) <= tirx::CallEffectKind::kReadState) {
+    return false;
+  }
+  bool found = false;
+  tirx::PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (const auto *call = node.as<CallNode>();
+        !found && call && call->op.same_as(tirx::builtin::if_then_else())) {
+      found = HasStatefulBooleanBranch(call->args[1], call->args[2]);
+    }
+  });
+  return found;
+}
+
+bool NeedsScopedConditional(const PrimExpr &true_value,
+                            const PrimExpr &false_value) {
+  if (HasStatefulBooleanBranch(true_value, false_value)) {
+    return true;
+  }
+  // A nested Boolean conditional may emit statements even when the outer
+  // result is numeric, for example through a cast of the Boolean result.
+  DataType dtype = true_value.dtype();
+  return dtype.is_scalar() &&
+         (dtype.is_int() || dtype.is_uint() || dtype.is_float() ||
+          dtype.is_bfloat16()) &&
+         (ContainsStatefulBooleanConditional(true_value) ||
+          ContainsStatefulBooleanConditional(false_value));
 }
 
 // Helper to check if a statement subtree contains loop break ops
@@ -922,17 +952,19 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       return casted.str();
     };
     std::string cond = PrintExpr_(op->args[0]);
-    if (HasStatefulBooleanBranch(op->args[1], op->args[2])) {
+    if (NeedsScopedConditional(op->args[1], op->args[2])) {
       // Printing a branch can emit statements (e.g. a Let binding). Generate
       // a dynamic if so both the statements and the value stay in that arm.
       std::string result = name_supply_->FreshName("_if_value");
+      std::string result_type = DTypeToString(op->dtype);
       PrintIndent();
-      stream << result << " = cutlass.Boolean(False)\n";
+      stream << result << " = " << result_type << "("
+             << (op->dtype.is_bool() ? "False" : "0") << ")\n";
       auto emit_branch = [&](const PrimExpr &branch) {
         int scope = BeginScope();
         std::string value = PrintExpr_(branch);
         PrintIndent();
-        stream << result << " = cutlass.Boolean(" << value << ")\n";
+        stream << result << " = " << result_type << "(" << value << ")\n";
         EndScope(scope);
       };
       PrintIndent();
@@ -2879,7 +2911,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       false_expr = sel->false_value;
     } else if (auto call = expr.as<CallNode>();
                call && call->op.same_as(tirx::builtin::if_then_else()) &&
-               !HasStatefulBooleanBranch(call->args[1], call->args[2])) {
+               !NeedsScopedConditional(call->args[1], call->args[2])) {
       value_is_conditional = true;
       cond_expr = call->args[0];
       true_expr = call->args[1];

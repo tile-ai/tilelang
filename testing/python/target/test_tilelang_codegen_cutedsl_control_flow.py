@@ -2,6 +2,7 @@
 
 import ast
 
+import pytest
 import torch
 
 import tilelang
@@ -50,3 +51,32 @@ def test_cutedsl_while_rechecks_stateful_chained_comparison():
     tilelang.compile(main, target="cutedsl")(output)
     # One body iteration, followed by the third draw.
     assert output.tolist() == [1, 3457867836]
+
+
+@tilelang.testing.requires_cutedsl
+@pytest.mark.parametrize("direct_store", [False, True], ids=["bind", "store"])
+def test_cutedsl_nested_conditional_keeps_rng_in_outer_arm(direct_store):
+    def nested_value(outer_gate, inner_gate):
+        return T.if_then_else(
+            outer_gate > 0,
+            T.cast(T.if_then_else(inner_gate > 0, T.rng_rand() > 0, False), "int32"),
+            7,
+        )
+
+    @T.prim_func
+    def main(G: T.Tensor((1,), "int32"), O: T.Tensor((2, 2), "int64")):
+        with T.Kernel(2, threads=1) as outer_gate:
+            T.rng_init(1234567, 0)
+            if direct_store:
+                O[outer_gate, 0] = T.cast(nested_value(outer_gate, G[0]), "int64")
+            else:
+                value = nested_value(outer_gate, G[0])
+                O[outer_gate, 0] = T.cast(value, "int64")
+            O[outer_gate, 1] = T.cast(T.rng_rand(), "int64")
+
+    inner_gate = torch.ones((1,), dtype=torch.int32, device="cuda")
+    output = torch.empty((2, 2), dtype=torch.int64, device="cuda")
+    tilelang.compile(main, target="cutedsl")(inner_gate, output)
+    # With the inner gate true in both blocks, only the outer true arm
+    # may advance the RNG. The final draws are the first and second sample.
+    assert output.tolist() == [[7, 3688262095], [1, 1022100329]]
