@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +24,7 @@
 #include "ascend/op/builtin.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
+#include "tl_templates/ascend/cann_compat_names.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -32,6 +35,16 @@ namespace {
 
 constexpr const char *kModeMerging = "MODE_MERGING";
 constexpr const char *kSimdOpPrefix = "tl.simd.";
+
+// A kernel parameter or local may have the same name as a bound SDK API.
+void ReserveCannNames(const NameSupply &supply) {
+#define TL_CANN_RESERVE(name, ...) supply->ReserveName("asc_" #name, false);
+  TL_CANN_SDK_NAMES(TL_CANN_RESERVE)
+#undef TL_CANN_RESERVE
+#define TL_CANN_RESERVE_MATH(name) supply->ReserveName(#name, false);
+  TL_CANN_SIMT_MATH_NAMES(TL_CANN_RESERVE_MATH)
+#undef TL_CANN_RESERVE_MATH
+}
 
 bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   if (auto call_op = op->op.as<Op>()) {
@@ -350,6 +363,12 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
   preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
   preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
+  // Finish emits SDK headers, imported source, then these declarations.
+  decl_stream << "TL_CANN_RESTORE_NAMES\n";
+}
+
+void CodeGenTileLangAscend::EmitPreamble_(std::ostream &os) const {
+  os << "TL_CANN_SAVE_NAMES\n";
 }
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
@@ -568,6 +587,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
+  ReserveCannNames(name_supply_);
   name_supply_->ReserveName("block_idx");
 
   // Register function parameters with their storage scope for codegen
@@ -751,7 +771,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 }
 
 void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
-  this->stream << "  asc_init();\n";
+  this->stream << "  TL_CANN_USE_CORE_NAMES\n  asc_init();\n";
   // Emit the function-entry #line anchor after the compiler prologue, so the
   // directive's line mapping is not consumed by generated code.
   CodeGenTileLangCBase::PreFunctionBody(f);
@@ -808,6 +828,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   saved_var_idmap.swap(var_idmap_);
   NameSupply saved_name_supply = name_supply_;
   name_supply_ = NameSupply();
+  ReserveCannNames(name_supply_);
   for (const auto &kv : saved_var_idmap) {
     var_idmap_[kv.first] = kv.second;
   }
@@ -905,7 +926,19 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
       }
     }
   }
-  decl_stream << ") {\n" << helper_body << "}\n\n";
+  decl_stream << ") {\n  TL_CANN_USE_CORE_NAMES\n";
+  if (vf_mode == VFMode::kSimd) {
+    decl_stream << "  TL_CANN_USE_SIMD_NAMES\n";
+  } else if (vf_mode == VFMode::kSimt) {
+    if (!has_simt_math_included_) {
+      preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
+      has_simt_math_included_ = true;
+    }
+    decl_stream << "  TL_CANN_USE_SIMT_MATH_NAMES\n";
+  } else {
+    LOG(FATAL) << "Unexpected VF helper mode: " << VFModeName(vf_mode);
+  }
+  decl_stream << helper_body << "}\n\n";
 }
 
 void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
@@ -3816,16 +3849,56 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             const ffi::Array<PrimExpr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
+  // T.call_extern also accepts qualified SDK and compatibility spellings.
+  // Emit the bare name for the execution domain that binds it.
+  struct Route {
+    std::string_view native, wrapper;
+    VFMode mode;
+    std::optional<size_t> fixed_arity = std::nullopt;
+  };
+#define TL_CANN_CORE(name, ...)                                                \
+  {"asc_" #name, "tl::cann::" #name, VFMode::kNone, __VA_ARGS__},
+#define TL_CANN_SIMD(name, ...)                                                \
+  {"asc_" #name, "tl::cann::" #name, VFMode::kSimd},
+#define TL_CANN_MATH(name) {#name, "tl::cann::simt::" #name, VFMode::kSimt},
+  static constexpr Route routes[] = {
+      TL_CANN_CORE_NAMES(TL_CANN_CORE) TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
+          TL_CANN_SIMT_MATH_NAMES(TL_CANN_MATH)};
+#undef TL_CANN_MATH
+#undef TL_CANN_SIMD
+#undef TL_CANN_CORE
+  std::string_view symbol(global_symbol.c_str(), global_symbol.size());
+  const bool explicit_global = symbol.substr(0, 2) == "::";
+  if (explicit_global)
+    symbol.remove_prefix(2);
+  for (const auto &route : routes) {
+    if ((route.mode != VFMode::kNone && route.mode != vf_mode_) ||
+        (symbol != route.native && symbol != route.wrapper))
+      continue;
+    // Keep global overload lookup when the wrapper has a different arity.
+    if (explicit_global && symbol == route.native && route.fixed_arity &&
+        args.size() - skip_first_arg != *route.fixed_arity)
+      break;
+    global_symbol = std::string(route.native);
+    if (route.mode == VFMode::kSimd) {
+      // Register APIs consume and return whole registers. Generic vector
+      // externs below call a scalar function once per lane.
+      CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg,
+                                os);
+      return;
+    }
+    break;
+  }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
   // Select the scalar-core implementation using the existing VF context.
   if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
-      global_symbol == "sqrtf") {
+      (global_symbol == "sqrtf" || global_symbol == "::sqrtf")) {
     global_symbol = "AscendC::Std::sqrt";
     if (!has_ascend_std_math_included_) {
       // The Std headers use AscendC annotations from kernel_operator.h.
-      decl_stream << "#include <kernel_operator.h>\n";
-      decl_stream << "#include <utils/std/cmath.h>\n";
+      preamble_stream_ << "#include <kernel_operator.h>\n";
+      preamble_stream_ << "#include <utils/std/cmath.h>\n";
       has_ascend_std_math_included_ = true;
     }
   }

@@ -1,3 +1,4 @@
+import ctypes
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -211,6 +212,20 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
         else:
             assert result == 1.5
         assert msprof_calls == [(2, torch.device("npu:2"), 2, backend == "msprof_detail")]
+
+
+def test_npu_flush_lookup_accepts_a_runtime_without_the_symbol(monkeypatch):
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: SimpleNamespace())
+    assert torch_bench._get_npu_l2_cache_flush.__wrapped__() is None
+
+
+def test_npu_event_without_native_flush_still_times_work(monkeypatch, accelerator):
+    state = accelerator("npu")
+    monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: None)
+    assert bench.do_bench(state.function, device=torch.device("npu:2"), _n_repeat=2, _n_warmup=1, cache_size=2) == 4.0
+    assert state.allocation_sizes == [0]
+    assert state.flushes == 0
+    assert set(state.calls) == {2}
 
 
 def test_npu_profiler_input_generation_is_scoped(monkeypatch, accelerator):

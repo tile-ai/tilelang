@@ -68,6 +68,23 @@ def test_mixed_scalar_simt_codegen_restores_execution_domain(math_op, intrinsic)
     assert source.count(intrinsic + "(") == 1
 
 
+def test_math_headers_precede_imported_source():
+    helper = "__aicore__ inline float scale_input(float v) { return v * 2; }"
+
+    @T.prim_func
+    def main(x: T.float32, out: T.Tensor((2,), "float32")):
+        with T.Kernel(1):
+            T.import_source(helper)
+            out[0] = T.sqrt(T.call_extern("float32", "scale_input", x))
+            with T.SimtVF(threads=1):
+                out[1] = T.pow(x, x)
+
+    source = tilelang.lower(main, target="ascend").kernel_source
+    preamble = source[: source.index(helper)]
+    for header in ("kernel_operator.h", "utils/std/cmath.h", "tl_templates/ascend/simt_math.h"):
+        assert f"#include <{header}>" in preamble
+
+
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("math_op,reference", [(T.sqrt, torch.sqrt), (T.rsqrt, torch.rsqrt)], ids=["sqrt", "rsqrt"])
 def test_scalar_math_numerics(math_op, reference):

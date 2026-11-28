@@ -3,12 +3,12 @@
 #include <stdio.h>
 
 #include "acl/acl.h"
-#include "c_api/asc_simd.h"
 #include "simt_api/asc_bf16.h"
 #include "simt_api/asc_fp16.h"
 #include "simt_api/asc_fp8.h"
 #include "simt_api/asc_simt.h"
 #include "tl_templates/ascend/ascend_fp8.h"
+#include "tl_templates/ascend/cann_compat.h"
 #include "tl_templates/ascend/numeric_limits.h"
 #include "tl_templates/ascend/reduce.h"
 #include "tl_templates/ascend/simd_inst.h"
