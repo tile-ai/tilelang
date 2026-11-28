@@ -3,7 +3,12 @@
 // Device templates include the SDK version header before using these checks.
 #define TL_CANN_VERSION_SERIES(major, minor)                                   \
   (ASC_DEVKIT_MAJOR == (major) && ASC_DEVKIT_MINOR == (minor))
+#define TL_CANN_VERSION_EXACT(major, minor, patch)                             \
+  (TL_CANN_VERSION_SERIES(major, minor) && ASC_DEVKIT_PATCH == (patch))
+
 #define TL_CANN_9_1 TL_CANN_VERSION_SERIES(9, 1)
+#define TL_CANN_9_2_0_OR_9_3_0                                                 \
+  (TL_CANN_VERSION_EXACT(9, 2, 0) || TL_CANN_VERSION_EXACT(9, 3, 0))
 
 // Native SDK names shared by device templates and Ascend codegen.
 
