@@ -212,12 +212,14 @@ def VerifyParallelToPTO():
 
 
 def LegalizeParallelToPTO():
-    """Placeholder for the PTO Parallel legalization stage.
+    """Legalize the PTO Parallel input for vectorization.
 
-    Only the registration exists for now, so that the formal PTO pipeline
-    order is fixed; the safe scalar If/Select/Min/Max rewrites are left to
-    a later change. The placeholder preserves the input IR and rejects
-    nothing.
+    Folds lane-varying control flow into unconditional `Select` stores, keeps or
+    rewrites `Min`/`Max` depending on their dtype and `tl.pto.relaxed_minmax`,
+    rewrites the `tl/tir.infinity()` sentinel to a constant, and clears the
+    access predicates Verify admitted. Runs after VerifyParallelToPTO and before
+    VectorizeParallelToPTO; functions without a PTO target pass through
+    unchanged.
     """
     return _ffi_api.LegalizeParallelToPTO()  # type: ignore
 

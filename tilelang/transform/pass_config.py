@@ -67,6 +67,37 @@ class PassConfigKey(str, Enum):
     it.
     """
 
+    TL_PTO_RELAXED_MINMAX = "tl.pto.relaxed_minmax"
+    """Relaxed floating-point ``Min``/``Max`` inside ``T.Parallel`` (PTO backend).
+
+    Default: True.
+
+    - True (default): the compiler may assume the operands and the result are
+      not NaN and may ignore signed-zero differences. A lane-varying operand
+      (vector/vector, or vector against a lane-uniform scalar) then lowers to the
+      direct VMI instruction (``vmin``/``vmax``, or ``vmins``/``vmaxs`` against a
+      lane-uniform scalar).
+    - False: keeps the ordered comparison plus ``Select`` lowering, where an
+      unordered comparison (a NaN operand) or an equal-zero comparison selects
+      the right operand, at the cost of one compare plus one select.
+
+    Two lane-uniform scalar operands never become a vector instruction, whatever
+    this option says: an integer pair and a compile-time constant float pair keep
+    the scalar form, while a **runtime** float pair is rejected by
+    ``VerifyParallelToPTO`` (there is no scalar float ALU inside ``SIMD_VF``).
+
+    Integer ``Min``/``Max`` always use the direct instruction: integer
+    comparison has no NaN or signed-zero ambiguity. Under the relaxed form,
+    ``min/max(NaN, 1)`` yields NaN instead of 1 (the ``Select`` form returns the
+    right operand when the comparison is unordered), ``min(-0, +0)`` yields -0
+    instead of +0, and ``max(+0, -0)`` yields +0 instead of -0.
+
+    FP8 (``float8_e4m3fn``, ``float8_e5m2``) is admitted by the front end, so a
+    floating-point ``Min``/``Max`` on it follows this option like any other
+    float dtype. The element-set narrowing for FP8 lives in the PTOAS VMI
+    verifier today, not in the micro/VPTO layer, so a kernel that uses it needs
+    a PTOAS whose VMI element set includes FP8.
+    """
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: True
 

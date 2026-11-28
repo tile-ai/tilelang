@@ -16,6 +16,14 @@ using namespace tirx;
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoSchedule, Bool);
 
+// Consumed by LegalizeParallelToPTO: a floating-point Min/Max inside a
+// T.Parallel region may use the direct VMI instruction instead of the
+// comparison plus Select lowering. The pass keeps the node when this is true
+// and rewrites it to `Select(a < b, a, b)` when it is false; integers keep the
+// node either way, and a runtime lane-uniform float pair is rejected by
+// VerifyParallelToPTO because it would have to run on a scalar float ALU.
+TVM_REGISTER_PASS_CONFIG_OPTION("tl.pto.relaxed_minmax", Bool);
+
 // Emitted by tilelang.ascend.language.assume_conflict/assume_no_conflict and
 // consumed by src/ascend/transform/normalize_conflict_hints.cc, so it lives
 // with the rest of the Ascend op registrations.
