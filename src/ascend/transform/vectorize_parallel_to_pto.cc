@@ -657,9 +657,9 @@ private:
     }
     if (const auto *store = body.as<BufferStoreNode>()) {
       ICHECK(!store->predicate.defined())
-          << "[VectorizeParallelToPTO] internal error: predicated store passed "
-             "Verify; predicated stores must be rejected by "
-             "VerifyParallelToPTO";
+          << "[VectorizeParallelToPTO] internal error: a predicated store "
+             "survived LegalizeParallelToPTO; every admitted predicate must be "
+             "cleared there before vectorization";
       Array<Stmt> pre;
       PrimExpr value = ConvertExpr(store->value, &pre);
       auto access = pto_analysis::AnalyzeBufferAccess(

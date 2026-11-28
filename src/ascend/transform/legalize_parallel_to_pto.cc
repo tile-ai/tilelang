@@ -10,9 +10,13 @@
  * Per conditional, the post-order visitor aligns both arms into one destination
  * sequence (`AlignArmDestinations`: same-destination stores share a position, a
  * lone store gets an identity pad `A = Load(A)`) and emits one unconditional
- * `Select` per position (`EmitAlignedPairs`). Min/Max become comparisons plus
- * `Select` and the tl/tir.infinity() sentinel becomes a FloatImm, in the same
- * pass.
+ * `Select` per position (`EmitAlignedPairs`).
+ *
+ * Min/Max take one of two paths in the same pass: an integer Min/Max, or a
+ * floating-point one under `tl.pto.relaxed_minmax`, keeps its node so Vectorize
+ * can pick the direct VMI instruction; every other admitted Min/Max becomes a
+ * comparison plus `Select` before Vectorize sees it. The tl/tir.infinity()
+ * sentinel becomes a FloatImm here as well.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -137,7 +141,8 @@ private:
 // every use, including after an enclosing conditional is folded.
 struct PlanTask {
   Stmt stmt;
-  const BufferStoreNode *store = nullptr;
+  /*! The statement as a store when it is one; undefined for a plain Bind. */
+  BufferStore store;
 };
 
 using AlignedTask = std::pair<Optional<Stmt>, Optional<Stmt>>;
@@ -467,24 +472,38 @@ public:
       // symbols: expand them so `r = row + 1` is judged as `row + 1`. The
       // region-entry snapshot (`predicate_env_`) covers the enclosing scope;
       // the fold-site Bind environment covers aliases defined inside the unit,
-      // which is what makes `j = row; if row < 2: y[j, i] = 1` decidable.
-      PrimExpr index = predicate_env_.empty()
-                           ? indices[axis]
-                           : Substitute(indices[axis], predicate_env_);
-      index = ExpandIndexAliases(index);
+      // which is what makes `j = row; if row < 2: y[j, i] = 1` decidable. The
+      // expansion reuses the shared resolver, so its depth and snapshot rules
+      // are the access analyzer's, not a second copy of them.
+      const PrimExpr base_index =
+          predicate_env_.empty() ? indices[axis]
+                                 : Substitute(indices[axis], predicate_env_);
+      const IndexExpansion expansion = ExpandIndexAliases(base_index);
+      const PrimExpr &index = expansion.expr;
       const arith::ConstIntBound bound =
           predicate_analyzer_.const_int_bound(index);
       if (bound->min_value <= -kRuntimeBound ||
           bound->max_value >= kRuntimeBound) {
-        // Unprovable. Accepting is the caller's contract *only* while the
-        // folded condition does not restrict the symbols that make the range
-        // unprovable: the fold evaluates the access for every lane, so an
+        // Unprovable. Accepting is the caller's contract *only* while neither
+        // the index nor the destination extent is what the folded condition
+        // constrains: the fold evaluates the access for every lane, so an
         // address that fits only under the guard must not become
         // unconditional. `if 0 <= row < 2: y[row, i] = 1` on a (2, 64) buffer
-        // is the case: `row = 2` never accessed the buffer in the source.
-        // This check needs no extent, so a symbolic axis runs it too -- only
-        // the static overflow scan below needs one.
+        // is the index case; `if i < n: y[i + 32 * step]` on `(n,)` is the
+        // extent case, whose extent check would otherwise be skipped by the
+        // `continue` below.
+        if (!expansion.resolved) {
+          out_of_bounds_detail_ =
+              "buffer `" + std::string(buffer->name) + "` axis " +
+              std::to_string(axis) +
+              " keeps an index alias that cannot be resolved; the guard may be "
+              "what keeps that address in range";
+          return true;
+        }
         if (GuardCarriesTheAccess(buffer, axis, index, constrained)) {
+          return true;
+        }
+        if (GuardCarriesTheExtent(buffer, axis, constrained)) {
           return true;
         }
         continue; // runtime-driven axis, not guarded: the program's contract
@@ -512,16 +531,7 @@ public:
                 extent > make_const(extent.dtype(), bound->max_value))) {
           continue;
         }
-        for (const VarNode *symbol : ConditionSymbols(buffer->shape[axis])) {
-          if (constrained.count(symbol) == 0) {
-            continue;
-          }
-          out_of_bounds_detail_ =
-              "buffer `" + std::string(buffer->name) + "` axis " +
-              std::to_string(axis) + " has symbolic extent `" +
-              symbol->name_hint +
-              "` that the folded condition is the only bound of; folding "
-              "would store every lane of the unit";
+        if (GuardCarriesTheExtent(buffer, axis, constrained)) {
           return true;
         }
         continue;
@@ -554,6 +564,25 @@ public:
     return false;
   }
 
+  // True when the folded condition constrains a symbol of the destination's
+  // extent expression, i.e. the guard is what keeps the access inside the
+  // buffer's logical extent.
+  bool GuardCarriesTheExtent(const Buffer &buffer, size_t axis,
+                             const std::set<const VarNode *> &constrained) {
+    for (const VarNode *symbol : ConditionSymbols(buffer->shape[axis])) {
+      if (constrained.count(symbol) == 0) {
+        continue;
+      }
+      out_of_bounds_detail_ =
+          "buffer `" + std::string(buffer->name) + "` axis " +
+          std::to_string(axis) + " has symbolic extent `" + symbol->name_hint +
+          "` that the folded condition is the only bound of; folding would "
+          "store every lane of the unit";
+      return true;
+    }
+    return false;
+  }
+
   // Symbols inside `expr` whose own range the analyzer cannot bound: kernel
   // parameters and other unconstrained runtime values. A loop coordinate never
   // lands here, because every enclosing loop binds its range.
@@ -578,35 +607,37 @@ public:
   // Every symbol the folded condition mentions. Collected conservatively: a
   // condition that constrains `row` through any expression makes the guard a
   // candidate reason for the access to fit.
-  // Expands pure index aliases through the lexical Bind environment the fold
-  // has seen, transitively. A Bind whose value reads memory is a snapshot: it
-  // stays opaque, matching the admission rule Verify applies to predicates.
-  PrimExpr ExpandIndexAliases(const PrimExpr &expr) {
+  /*! Result of expanding the coordinate aliases of one index. */
+  struct IndexExpansion {
+    /*! The index with every resolvable alias expanded. */
+    PrimExpr expr;
+    /*! False when an alias could not be resolved (a memory snapshot, or a chain
+     * past the shared resolver's depth/node budget). */
+    bool resolved = true;
+  };
+
+  // Expands pure coordinate aliases through the lexical Bind environment the
+  // fold has seen. The shared resolver owns the rules (depth, node budget, and
+  // "a definition that reads memory is a snapshot, never an address"), so this
+  // pass cannot drift from the access analyzer.
+  IndexExpansion ExpandIndexAliases(const PrimExpr &expr) {
+    IndexExpansion expansion{expr, true};
     if (guard_bind_env_.empty()) {
-      return expr;
+      return expansion;
     }
-    Map<Var, PrimExpr> aliases;
-    for (const auto &entry : guard_bind_env_) {
-      if (pto::IsSafelyReevaluableValue(entry.second)) {
-        aliases.Set(entry.first, entry.second);
-      }
+    const Optional<PrimExpr> resolved =
+        pto::ResolveIndexAliases(expr, guard_bind_env_);
+    if (!resolved.defined()) {
+      expansion.resolved = false;
+      return expansion;
     }
-    if (aliases.empty()) {
-      return expr;
-    }
-    PrimExpr result = expr;
-    // Aliases can chain (`a = b`, `b = row`); a small fixed number of passes
-    // covers the chains and also stops a self-referential definition.
-    for (int pass = 0; pass < 8; ++pass) {
-      const PrimExpr next = Substitute(result, aliases);
-      if (next.same_as(result)) {
-        break;
-      }
-      result = next;
-    }
-    return result;
+    expansion.expr = resolved.value();
+    return expansion;
   }
 
+  // Every symbol the folded condition mentions. Collected conservatively: a
+  // condition that constrains `row` through any expression makes the guard a
+  // candidate reason for the access to fit.
   std::set<const VarNode *> ConditionSymbols(const PrimExpr &condition) {
     std::set<const VarNode *> symbols;
     std::set<const VarNode *> expanded;
@@ -750,9 +781,9 @@ public:
     return pto::MayConflictStorage(lhs_buffer, rhs_buffer, storage_origins_);
   }
 
-  bool SameArmLocation(const BufferNode *lhs_buffer,
+  bool SameArmLocation(const Buffer &lhs_buffer,
                        const Array<PrimExpr> &lhs_indices,
-                       const BufferNode *rhs_buffer,
+                       const Buffer &rhs_buffer,
                        const Array<PrimExpr> &rhs_indices) {
     // Compare the *physical* address: two Buffer views (A and Av) can share
     // the same UB data while being distinct BufferNodes, and views that start
@@ -763,7 +794,7 @@ public:
     if (lhs_buffer->dtype != rhs_buffer->dtype) {
       return false;
     }
-    if (lhs_buffer->data.get() != rhs_buffer->data.get() ||
+    if (!lhs_buffer->data.same_as(rhs_buffer->data) ||
         lhs_indices.size() != rhs_indices.size() ||
         !ffi::StructuralEqual()(lhs_buffer->elem_offset,
                                 rhs_buffer->elem_offset) ||
@@ -794,11 +825,11 @@ public:
       return true;
     }
     if (const auto *store = stmt.as<BufferStoreNode>()) {
-      out->push_back({stmt, store});
+      out->push_back({stmt, GetRef<BufferStore>(store)});
       return true;
     }
     if (stmt.as<BindNode>() != nullptr) {
-      out->push_back({stmt, nullptr});
+      out->push_back({stmt, BufferStore()});
       return true;
     }
     return false;
@@ -815,7 +846,7 @@ public:
       Fail("conditional branches must lower to stores, Binds or no-ops");
     }
     for (const PlanTask &task : tasks) {
-      if (task.store == nullptr) {
+      if (!task.store.defined()) {
         continue;
       }
       for (const LoadCollector::Location &load : condition_loads.loads) {
@@ -874,7 +905,7 @@ public:
     // variable still has to dominate every store that references it.
     const auto collect_reads = [](const PlanTask &task) {
       LoadCollector reads;
-      if (task.store != nullptr) {
+      if (task.store.defined()) {
         reads(task.store->value);
         for (const PrimExpr &index : task.store->indices) {
           reads(index);
@@ -902,18 +933,18 @@ public:
                   }
                 });
               }
-              if (seq[i].store != nullptr && seq[j].store != nullptr &&
+              if (seq[i].store.defined() && seq[j].store.defined() &&
                   MayConflict(seq[i].store->buffer, seq[j].store->buffer)) {
                 dep = true; // WAW
               }
-              if (seq[i].store != nullptr) {
+              if (seq[i].store.defined()) {
                 for (const LoadCollector::Location &load : reads_j) {
                   if (MayConflict(seq[i].store->buffer, load.buffer)) {
                     dep = true; // earlier write, later read
                   }
                 }
               }
-              if (seq[j].store != nullptr) {
+              if (seq[j].store.defined()) {
                 for (const LoadCollector::Location &load : reads_i) {
                   if (MayConflict(seq[j].store->buffer, load.buffer)) {
                     dep = true; // earlier read, later overwrite
@@ -940,9 +971,9 @@ public:
     std::vector<PlanTask> representatives;
     const auto same_destination = [this](const PlanTask &lhs,
                                          const PlanTask &rhs) {
-      return lhs.store != nullptr && rhs.store != nullptr &&
-             SameArmLocation(lhs.store->buffer.get(), lhs.store->indices,
-                             rhs.store->buffer.get(), rhs.store->indices);
+      return lhs.store.defined() && rhs.store.defined() &&
+             SameArmLocation(lhs.store->buffer, lhs.store->indices,
+                             rhs.store->buffer, rhs.store->indices);
     };
     const auto label_index =
         [this, &label_masks, &representatives, n, m,
@@ -1152,8 +1183,8 @@ public:
       const BufferStoreNode *shape =
           then_store != nullptr ? then_store : else_store;
       if (then_store != nullptr && else_store != nullptr &&
-          !SameArmLocation(then_store->buffer.get(), then_store->indices,
-                           else_store->buffer.get(), else_store->indices)) {
+          !SameArmLocation(then_store->buffer, then_store->indices,
+                           else_store->buffer, else_store->indices)) {
         Fail("the two arms do not write the same destination after alignment");
       }
       const PrimExpr then_value =

@@ -1901,23 +1901,23 @@ bool IsProvablyTruePredicate(const PrimExpr &predicate,
 // cannot follow. Record the target Vars only; resolving their origin was
 // unsound (a handle BufferLoad holds a pointer value, not the storage that
 // contains it) and let two admission bypasses through.
-void CollectHandleBindTargets(const Stmt &stmt,
-                              std::set<const VarNode *> *out) {
+void CollectHandleBindTargets(const Stmt &stmt, VarIdentitySet *out) {
   class Collector : public tirx::StmtExprVisitor {
   public:
-    explicit Collector(std::set<const VarNode *> *out) : out_(out) {}
+    explicit Collector(VarIdentitySet *out) : out_(out) {}
     void VisitStmt_(const tirx::BindNode *op) final {
       if (op->value.dtype().is_handle()) {
-        out_->insert(op->var.get());
+        out_->insert(op->var);
       }
       tirx::StmtExprVisitor::VisitStmt_(op);
     }
 
   private:
-    std::set<const VarNode *> *out_;
+    VarIdentitySet *out_;
   };
   Collector collector(out);
   collector(stmt);
+  return;
 }
 
 StorageOrigins CollectStorageOrigins(const Stmt &body,

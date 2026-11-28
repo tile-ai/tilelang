@@ -255,7 +255,7 @@ private:
       // ordering analysis guess -- a conservative ordering cannot repair an
       // access that should never have been admitted (a volatile read or a
       // cast the ISA cannot perform, for instance).
-      if (parent_->handle_bind_targets_.count(buffer->data.get()) != 0) {
+      if (parent_->handle_bind_targets_.count(buffer->data) != 0) {
         std::ostringstream oss;
         oss << "buffer `" << buffer->name
             << "` is declared over a data pointer bound by a handle Bind, "
@@ -868,126 +868,124 @@ private:
     }
 
     void CheckBinaryOpTypes(const PrimExpr &expr) {
-      std::function<void(const PrimExpr &)> check =
-          [&](const PrimExpr &e) {
-            // Ordered comparison of bool operands has no lane-mask lowering;
-            // only EQ/NE is expressed in the mask domain.
-            {
-              PrimExpr rel_a;
-              PrimExpr rel_b;
-              const pto::RelationalKind *rel =
-                  pto::MatchRelational(e, &rel_a, &rel_b);
-              if (rel != nullptr && std::string(rel->cmp) != "eq" &&
-                  std::string(rel->cmp) != "ne" && rel_a.dtype().is_bool() &&
-                  rel_b.dtype().is_bool()) {
-                LOG(FATAL) << "[VerifyParallelToPTO] type: ordered comparison "
-                              "of bool operands has no lane-mask lowering";
+      std::function<void(const PrimExpr &)> check = [&](const PrimExpr &e) {
+        // Ordered comparison of bool operands has no lane-mask lowering;
+        // only EQ/NE is expressed in the mask domain.
+        {
+          PrimExpr rel_a;
+          PrimExpr rel_b;
+          const pto::RelationalKind *rel =
+              pto::MatchRelational(e, &rel_a, &rel_b);
+          if (rel != nullptr && std::string(rel->cmp) != "eq" &&
+              std::string(rel->cmp) != "ne" && rel_a.dtype().is_bool() &&
+              rel_b.dtype().is_bool()) {
+            parent_->Fail("dtype", "ordered comparison of bool operands "
+                                   "has no lane-mask lowering");
+          }
+        }
+        if (auto bin = GetBinaryOperands(e)) {
+          check(bin->a);
+          check(bin->b);
+          if (bin->vmi_op != nullptr) {
+            CheckOneOp(bin->vmi_op, bin->dtype, bin->a, bin->b);
+          }
+          return;
+        }
+        if (const auto *cast = e.as<CastNode>()) {
+          check(cast->value);
+          return;
+        }
+        // Select, like the relational / boolean nodes of
+        // GetBinaryOperands, is expressed by Legalize and Vectorize as
+        // vcmp+vsel. Operands recurse through the same check, so lane
+        // classification and dtype rules still apply to whatever feeds
+        // them.
+        if (const auto *sel = e.as<SelectNode>()) {
+          if (sel->true_value.dtype().is_bool() ||
+              sel->false_value.dtype().is_bool()) {
+            parent_->Fail("dtype", "a bool-valued Select has no vreg "
+                                   "lowering");
+          }
+          check(sel->condition);
+          check(sel->true_value);
+          check(sel->false_value);
+          return;
+        }
+        if (const auto *notn = e.as<NotNode>()) {
+          check(notn->a);
+          return;
+        }
+        // Min/Max are rewritten to Select by Legalize, but their operands
+        // must still pass the same type rules here (e.g. the
+        // integer-bitwise ban).
+        if (const auto *minn = e.as<MinNode>()) {
+          // Legalize rewrites Min/Max to Select, which would introduce a
+          // bool-ordered comparison and a bool-valued Select after Verify.
+          if (minn->dtype.is_bool()) {
+            parent_->Fail("dtype", "Min/Max of bool operands has no "
+                                   "lane-mask lowering");
+          }
+          CheckMinMaxDType(minn->dtype, "Min");
+          CheckUniformFloatRuntime("Min", minn->dtype, minn->a, minn->b);
+          check(minn->a);
+          check(minn->b);
+          return;
+        }
+        if (const auto *maxn = e.as<MaxNode>()) {
+          // Same gate as Min: Legalize rewrites Max to Select, which would
+          // introduce a bool-ordered compare and a bool-valued Select.
+          if (maxn->dtype.is_bool()) {
+            parent_->Fail("dtype", "Min/Max of bool operands has no "
+                                   "lane-mask lowering");
+          }
+          CheckMinMaxDType(maxn->dtype, "Max");
+          CheckUniformFloatRuntime("Max", maxn->dtype, maxn->a, maxn->b);
+          check(maxn->a);
+          check(maxn->b);
+          return;
+        }
+        if (const auto *call = e.as<CallNode>()) {
+          if (auto call_op = call->op.as<Op>()) {
+            const std::string &name = call_op.value()->name;
+            // Boolean mask-combine calls (the shared
+            // tirx.bitwise_* / tir.And|Or|Not admission table) and the
+            // tl/tir.infinity() constant.
+            // A mask combine only has a lowering for bool (lane-mask)
+            // values.
+            if (pto_analysis::MaskLogicVmiOpName(name) != nullptr) {
+              // An integer bitwise call is rejected with a proper
+              // diagnostic; the verifier's Fail adds the region and unit.
+              if (!call->dtype.is_bool()) {
+                parent_->Fail("dtype",
+                              "bitwise mask combine `" + name +
+                                  "` requires bool (lane-mask) operands; an "
+                                  "integer bitwise call has no lane-mask "
+                                  "lowering");
               }
-            }
-            if (auto bin = GetBinaryOperands(e)) {
-              check(bin->a);
-              check(bin->b);
-              if (bin->vmi_op != nullptr) {
-                CheckOneOp(bin->vmi_op, bin->dtype, bin->a, bin->b);
+              for (const auto &arg : call->args) {
+                check(arg);
               }
               return;
             }
-            if (const auto *cast = e.as<CastNode>()) {
-              check(cast->value);
+            if (name == "tl.infinity" || name == "tir.infinity") {
               return;
             }
-            // Select, like the relational / boolean nodes of
-            // GetBinaryOperands, is expressed by Legalize and Vectorize as
-            // vcmp+vsel. Operands recurse through the same check, so lane
-            // classification and dtype rules still apply to whatever feeds
-            // them.
-            if (const auto *sel = e.as<SelectNode>()) {
-              if (sel->true_value.dtype().is_bool() ||
-                  sel->false_value.dtype().is_bool()) {
-                LOG(FATAL) << "[VerifyParallelToPTO] type: a bool-valued "
-                              "Select has no vreg lowering";
-              }
-              check(sel->condition);
-              check(sel->true_value);
-              check(sel->false_value);
+            // The tirx.fabs/exp/log/sqrt unary math table; the original
+            // tirx op name stays the CheckOneUnaryOp key.
+            if (pto_analysis::VectorUnaryVmiOpName(name) != nullptr) {
+              check(call->args[0]);
+              CheckOneUnaryOp(name.c_str(), call->dtype, call->args[0]);
               return;
             }
-            if (const auto *notn = e.as<NotNode>()) {
-              check(notn->a);
-              return;
-            }
-            // Min/Max are rewritten to Select by Legalize, but their operands
-            // must still pass the same type rules here (e.g. the
-            // integer-bitwise ban).
-            if (const auto *minn = e.as<MinNode>()) {
-              // Legalize rewrites Min/Max to Select, which would introduce a
-              // bool-ordered comparison and a bool-valued Select after Verify.
-              if (minn->dtype.is_bool()) {
-                LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
-                              "operands has no lane-mask lowering";
-              }
-              CheckMinMaxDType(minn->dtype, "Min");
-              CheckUniformFloatRuntime("Min", minn->dtype, minn->a, minn->b);
-              check(minn->a);
-              check(minn->b);
-              return;
-            }
-            if (const auto *maxn = e.as<MaxNode>()) {
-              // Same gate as Min: Legalize rewrites Max to Select, which would
-              // introduce a bool-ordered compare and a bool-valued Select.
-              if (maxn->dtype.is_bool()) {
-                LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
-                              "operands has no lane-mask lowering";
-              }
-              CheckMinMaxDType(maxn->dtype, "Max");
-              CheckUniformFloatRuntime("Max", maxn->dtype, maxn->a, maxn->b);
-              check(maxn->a);
-              check(maxn->b);
-              return;
-            }
-            if (const auto *call = e.as<CallNode>()) {
-              if (auto call_op = call->op.as<Op>()) {
-                const std::string &name = call_op.value()->name;
-                // Boolean mask-combine calls (the shared
-                // tirx.bitwise_* / tir.And|Or|Not admission table) and the
-                // tl/tir.infinity() constant.
-                // A mask combine only has a lowering for bool (lane-mask)
-                // values.
-                if (pto_analysis::MaskLogicVmiOpName(name) != nullptr) {
-                  // An integer bitwise call is rejected with a proper
-                  // diagnostic; CheckBinaryOpTypes is static, so report via
-                  // LOG(FATAL) (the same channel Fail uses).
-                  if (!call->dtype.is_bool()) {
-                    LOG(FATAL)
-                        << "[VerifyParallelToPTO] type: bitwise mask combine `"
-                        << name
-                        << "` requires bool (lane-mask) operands; an integer "
-                           "bitwise call has no lane-mask lowering";
-                  }
-                  for (const auto &arg : call->args) {
-                    check(arg);
-                  }
-                  return;
-                }
-                if (name == "tl.infinity" || name == "tir.infinity") {
-                  return;
-                }
-                // The tirx.fabs/exp/log/sqrt unary math table; the original
-                // tirx op name stays the CheckOneUnaryOp key.
-                if (pto_analysis::VectorUnaryVmiOpName(name) != nullptr) {
-                  check(call->args[0]);
-                  CheckOneUnaryOp(name.c_str(), call->dtype, call->args[0]);
-                  return;
-                }
-              }
-            }
-            if (const auto *load = e.as<BufferLoadNode>()) {
-              // Index arithmetic is address analysis, not value arithmetic.
-              (void)load;
-              return;
-            }
-            // Vars/constants carry no operation to check.
-          };
+          }
+        }
+        if (const auto *load = e.as<BufferLoadNode>()) {
+          // Index arithmetic is address analysis, not value arithmetic.
+          (void)load;
+          return;
+        }
+        // Vars/constants carry no operation to check.
+      };
       check(expr);
     }
 
@@ -1951,7 +1949,7 @@ private:
   // (collected function-wide by CollectHandleBindTargets). A buffer declared
   // over one of these pointers is a view the lane analysis cannot follow, so
   // every access to it is rejected (see CheckScope).
-  std::set<const VarNode *> handle_bind_targets_;
+  pto::VarIdentitySet handle_bind_targets_;
   // Facts that stay valid around a converting region and must reach its
   // predicate admission: scalar Binds defined outside it and the enclosing loop
   // ranges. Restricted to safely re-evaluable Binds, like the region walk.

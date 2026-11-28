@@ -175,6 +175,36 @@ def _is_negative_infinity(expr):
     return False
 
 
+def _vand_operand_polarities(mod):
+    """For every emitted bitwise-and, whether its two operands share polarity.
+
+    The mask truth tables are `(a & b) | (!a & !b)` for EQ and
+    `(a & !b) | (!a & b)` for NE, so a shared polarity means EQ and a crossed
+    one means NE. Reading the operands is what tells the two apart; a count of
+    `vand`/`vsel` cannot.
+    """
+    negated = set()
+    polarities = []
+
+    def polarity(expr):
+        return isinstance(expr, tvm.tirx.Var) and expr.name in negated
+
+    for bind in _collect(mod, lambda n: isinstance(n, tvm.tirx.Bind)):
+        call = bind.value
+        if not isinstance(call, tvm.tirx.Call):
+            continue
+        op_name = getattr(getattr(call, "op", None), "name", None)
+        if not isinstance(op_name, str):
+            continue
+        if op_name == "tl.vmi.vnot":
+            operand = call.args[0]
+            if isinstance(operand, tvm.tirx.Var):
+                negated.add(operand.name)
+        elif op_name == "tl.vmi.vand":
+            polarities.append(polarity(call.args[0]) == polarity(call.args[1]))
+    return polarities
+
+
 def _vmi_call_names(mod):
     names = {}
 
@@ -864,6 +894,40 @@ def test_symbolic_extent_outside_the_condition_still_folds():
     assert _selects(stages["legalize"]), "the guard must become a value choice"
 
 
+def _k_guard_bounds_a_symbolic_extent_with_an_offset(lanes=128):
+    """`y: (n,)` with a runtime offset: the guard bounds only the extent.
+
+    The index `i + 32 * step` is unprovable (the step is runtime) and the guard
+    never mentions the step, so the *extent* is the dependency the guard
+    carries. The unprovable-index path must still judge it.
+    """
+
+    @T.prim_func
+    def main(n: T.int32, X_handle: T.handle, Y_handle: T.handle, step: T.int32):
+        X = T.match_buffer(X_handle, (lanes,), "float32")
+        Y = T.match_buffer(Y_handle, (n,), "float32")
+        with T.Kernel(1):
+            x = T.alloc_shared((lanes,), "float32")
+            y = T.alloc_shared((n,), "float32")
+            T.copy(X, x)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(lanes):
+                    if i < n:
+                        y[i + 32 * step] = x[i]
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_symbolic_extent_guard_is_judged_through_an_unprovable_index():
+    """The extent verdict must not be skipped just because the index is opaque."""
+    _, error = _lower_capture(_k_guard_bounds_a_symbolic_extent_with_an_offset(), expect_error=True)
+    assert error is not None, "a guard-bounded symbolic extent must reject an opaque index"
+    message = str(error)
+    assert "has symbolic extent `n`" in message, f"expected the extent diagnostic, got: {message}"
+
+
 def _k_lane_uniform_float_min(E=64, lanes=64):
     """A float Min over two runtime scalars: a scalar computation in the unit."""
 
@@ -1338,6 +1402,10 @@ def _k_scalar_bool_predicate(E=150, lanes=128, dtype="float32"):
             a = T.alloc_shared((P,), dtype)
             y = T.alloc_shared((P,), dtype)
             T.copy(A, a)
+            # Define every lane first: the read-back of the non-writing side and
+            # the copy-out both touch the padded lanes, so they must not read
+            # uninitialised UB.
+            T.copy(A, y)
             with T.SimdVF(lanes=lanes):
                 for i in T.Parallel(E):
                     if flag:
@@ -1362,6 +1430,9 @@ def _k_scalar_bool_and_lane_cond(E=150, lanes=128, dtype="float32"):
             a = T.alloc_shared((P,), dtype)
             y = T.alloc_shared((P,), dtype)
             T.copy(A, a)
+            # Same reason as the one-sided fixture above: seed the backup so the
+            # read-back and the padded copy-out are defined.
+            T.copy(A, y)
             with T.SimdVF(lanes=lanes):
                 for i in T.Parallel(E):
                     if flag and a[i] > T.float32(0.0):
@@ -2565,6 +2636,27 @@ def _k_mask_with_scalar_eq(E=256, lanes=64):
     return main
 
 
+def _k_mask_with_scalar_ne(E=256, lanes=64):
+    """The NE spelling of the same mask/scalar comparison."""
+
+    @T.prim_func
+    def main(A: T.Tensor((E,), "float32"), Y: T.Tensor((E,), "float32"), FLAG: T.bool):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((E,), "float32")
+            T.copy(A, a)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    y[i] = tvm.tirx.Select(
+                        tvm.tirx.NE(a[i] > T.float32(0.0), FLAG),
+                        T.float32(1.0),
+                        T.float32(0.0),
+                    )
+            T.copy(y, Y)
+
+    return main
+
+
 @pytest.mark.pto
 def test_mask_with_scalar_bool_equality_uses_the_truth_table():
     """A mask-vs-scalar EQ cannot be a vcmp: the VMI element set has no bool."""
@@ -2572,8 +2664,20 @@ def test_mask_with_scalar_bool_equality_uses_the_truth_table():
     assert error is None, f"a mask/scalar EQ must lower, got: {error}"
 
     names = _vmi_call_names(stages["vectorize"])
-    assert names.get("tl.vmi.vand", 0) >= 1, f"the truth table needs vand: {names}"
+    assert names.get("tl.vmi.vand", 0) >= 2, f"the truth table needs both vand pairs: {names}"
     assert names.get("tl.vmi.vsel", 0) >= 1, f"the Select must use vsel: {names}"
+
+    # EQ pairs equally-polarised operands; routing it through the NE table would
+    # cross them, which the polarity read detects while a count cannot.
+    polarities = _vand_operand_polarities(stages["vectorize"])
+    assert polarities, "the truth table must emit vand pairs"
+    assert all(polarities), f"EQ must pair equal polarity operands (a&b | !a&!b), got {polarities}"
+
+    ne_stages, ne_error = _lower_capture(_k_mask_with_scalar_ne())
+    assert ne_error is None, f"a mask/scalar NE must lower, got: {ne_error}"
+    ne_polarities = _vand_operand_polarities(ne_stages["vectorize"])
+    assert ne_polarities, "the NE truth table must emit vand pairs"
+    assert not any(ne_polarities), f"NE must cross the operand polarity (a&!b | !a&b), got {ne_polarities}"
 
 
 def _k_serial_outside_unit(E=256, lanes=64, iters=8):
@@ -3226,6 +3330,9 @@ def _k_runtime_offset_destination(E=256, lanes=64, width=512):
             a = T.alloc_shared((E,), "float32")
             y = T.alloc_shared((width,), "float32")
             T.copy(A, a)
+            # The shifted window's read-back and the copy-out read every lane,
+            # so the whole destination is defined before the unit runs.
+            T.fill(y, T.float32(0.0))
             with T.SimdVF(lanes=lanes):
                 for i in T.Parallel(E):
                     if a[i] > T.float32(0.0):

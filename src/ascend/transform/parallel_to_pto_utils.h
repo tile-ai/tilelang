@@ -18,6 +18,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -417,6 +418,17 @@ bool IsProvablyTruePredicate(const PrimExpr &predicate,
                              arith::Analyzer *analyzer,
                              const Map<Var, PrimExpr> &bind_env);
 
+/*! Identity order for `Var` handles: the sets below keep the handle alive for
+ * as long as the analysis reads it, and compare by node identity. */
+struct VarIdentityLess {
+  bool operator()(const Var &lhs, const Var &rhs) const {
+    // `std::less` gives a total order on pointers; a raw `<` between unrelated
+    // objects is unspecified by the standard.
+    return std::less<const VarNode *>()(lhs.get(), rhs.get());
+  }
+};
+using VarIdentitySet = std::set<Var, VarIdentityLess>;
+
 /*! Collects the target Vars of the handle-valued `Bind` statements of a
  * statement tree (`q = A.data`, `r = q`, a reinterpret cast, ...). A buffer
  * declared over one of these pointers is a view whose storage the lane analysis
@@ -424,17 +436,9 @@ bool IsProvablyTruePredicate(const PrimExpr &predicate,
  *
  * The pointer origin is deliberately not traced: a handle `BufferLoad` yields a
  * pointer value, not the storage that holds it. */
-void CollectHandleBindTargets(const Stmt &stmt, std::set<const VarNode *> *out);
+void CollectHandleBindTargets(const Stmt &stmt, VarIdentitySet *out);
 
 /*! What a function knows about where its buffers live. */
-/*! Identity order for `Var` handles: the sets below keep the handle alive for
- * as long as the analysis reads it, and compare by node identity. */
-struct VarIdentityLess {
-  bool operator()(const Var &lhs, const Var &rhs) const {
-    return lhs.get() < rhs.get();
-  }
-};
-using VarIdentitySet = std::set<Var, VarIdentityLess>;
 
 struct StorageOrigins {
   /*! Data Vars of real allocations (`AllocBuffer` / block `alloc_buffers`);

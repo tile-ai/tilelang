@@ -125,9 +125,11 @@ def test_carried_runtime_shell_counts_every_iteration(iters):
     rng = np.random.default_rng(11)
     x = rng.uniform(-2.0, 2.0, E).astype(np.float32)
     # The kernel takes a scalar argument, so the output cannot be derived from
-    # ``out_idx`` (a scalar parameter is not a tensor): pass the buffer in.
+    # ``out_idx`` (a scalar parameter is not a tensor): pass the buffer in. The
+    # buffer starts at a sentinel so the iters == 0 case really pins the zero
+    # seed the kernel copied out; an uninitialised buffer could match by luck.
     kernel = _compile_builder(_build_runtime_shells)
-    out = torch.empty((2, E), dtype=torch.float32, device=_dev())
+    out = torch.full((2, E), -9.0, dtype=torch.float32, device=_dev())
     kernel(torch.from_numpy(x).to(_dev()), out, iters)
     got = out.cpu().numpy().astype(np.float32)[0]
     want = (x * np.float32(iters)).astype(np.float32)

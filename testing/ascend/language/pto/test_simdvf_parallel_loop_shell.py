@@ -201,7 +201,15 @@ def test_inside_serial_shell_is_preserved(E, lanes, tail):
     # No carry promotion any more: the carrier keeps round-tripping through UB
     # and the ordering comes from the backend mem_bar (verify writes the value).
     assert "_carry" not in vec, "the carry promotion is retired"
-    assert _serial_shells_named(stages["vectorize"], "_t"), "the serial shell must survive vectorization"
+    shells = _serial_shells_named(stages["vectorize"], "_t")
+    assert shells, "the serial shell must survive vectorization"
+    # The in-shell update is the thing that must survive: check it inside the
+    # captured shell body, so a tail conversion that dropped the store fails
+    # here instead of only failing the `remaining` shape check.
+    shell_body = str(shells[0].body)
+    assert "vstore" in shell_body, (
+        f"the in-shell carrier store must stay inside the shell body, got {shell_body[:200]}"
+    )
 
     if tail:
         assert "remaining" in vec, "the tail path must keep its remaining counter"
