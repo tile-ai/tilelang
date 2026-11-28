@@ -10,9 +10,11 @@
 #include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -29,6 +31,43 @@ namespace codegen {
 
 using namespace ffi;
 namespace {
+
+bool HasStatefulBooleanBranch(const PrimExpr &true_value,
+                              const PrimExpr &false_value) {
+  return true_value.dtype() == DataType::Bool() &&
+         false_value.dtype() == DataType::Bool() &&
+         (tirx::SideEffect(true_value) > tirx::CallEffectKind::kReadState ||
+          tirx::SideEffect(false_value) > tirx::CallEffectKind::kReadState);
+}
+
+bool ContainsStatefulBooleanConditional(const PrimExpr &expr) {
+  if (tirx::SideEffect(expr) <= tirx::CallEffectKind::kReadState) {
+    return false;
+  }
+  bool found = false;
+  tirx::PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (const auto *call = node.as<CallNode>();
+        !found && call && call->op.same_as(tirx::builtin::if_then_else())) {
+      found = HasStatefulBooleanBranch(call->args[1], call->args[2]);
+    }
+  });
+  return found;
+}
+
+bool NeedsScopedConditional(const PrimExpr &true_value,
+                            const PrimExpr &false_value) {
+  if (HasStatefulBooleanBranch(true_value, false_value)) {
+    return true;
+  }
+  // A nested Boolean conditional may emit statements even when the outer
+  // result is numeric, for example through a cast of the Boolean result.
+  DataType dtype = true_value.dtype();
+  return dtype.is_scalar() &&
+         (dtype.is_int() || dtype.is_uint() || dtype.is_float() ||
+          dtype.is_bfloat16()) &&
+         (ContainsStatefulBooleanConditional(true_value) ||
+          ContainsStatefulBooleanConditional(false_value));
+}
 
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
@@ -913,6 +952,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       return casted.str();
     };
     std::string cond = PrintExpr_(op->args[0]);
+    if (NeedsScopedConditional(op->args[1], op->args[2])) {
+      // Printing a branch can emit statements (e.g. a Let binding). Generate
+      // a dynamic if so both the statements and the value stay in that arm.
+      std::string result = name_supply_->FreshName("_if_value");
+      std::string result_type = DTypeToString(op->dtype);
+      PrintIndent();
+      stream << result << " = " << result_type << "("
+             << (op->dtype.is_bool() ? "False" : "0") << ")\n";
+      auto emit_branch = [&](const PrimExpr &branch) {
+        int scope = BeginScope();
+        std::string value = PrintExpr_(branch);
+        PrintIndent();
+        stream << result << " = " << result_type << "(" << value << ")\n";
+        EndScope(scope);
+      };
+      PrintIndent();
+      stream << "if " << RemoveOutermostParentheses(cond) << ":\n";
+      emit_branch(op->args[1]);
+      PrintIndent();
+      stream << "else:\n";
+      emit_branch(op->args[2]);
+      os << result;
+      return;
+    }
     std::string true_val =
         cast_branch(PrintExpr_(op->args[1]), op->args[1].dtype());
     std::string false_val =
@@ -2847,7 +2910,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       true_expr = sel->true_value;
       false_expr = sel->false_value;
     } else if (auto call = expr.as<CallNode>();
-               call && call->op.same_as(tirx::builtin::if_then_else())) {
+               call && call->op.same_as(tirx::builtin::if_then_else()) &&
+               !NeedsScopedConditional(call->args[1], call->args[2])) {
       value_is_conditional = true;
       cond_expr = call->args[0];
       true_expr = call->args[1];
@@ -3382,9 +3446,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BindNode *op) {
 void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
   DataType alloc_dtype = op->buffer->dtype;
   std::string vid = AllocVarID(op->buffer->data.get());
-  PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer->data);
   alloc_storage_scope_[op->buffer->data.get()] = scope;
+  if (scope != "local.var") {
+    PrintIndent();
+  }
 
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
@@ -3443,7 +3509,10 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
         }
         init = user_init;
       }
-      stream << vid << " = " << PrintExpr_(init) << "\n";
+      // Printing the initializer can emit complete statements.
+      std::string init_value = PrintExpr_(init);
+      PrintIndent();
+      stream << vid << " = " << init_value << "\n";
     } else {
       ICHECK(false) << "Unsupported scope: " << scope;
     }
@@ -3510,6 +3579,44 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
   } else {
     CodeGenTileLangPY::VisitStmt_(op);
   }
+}
+
+void CodeGenTileLangCuTeDSL::VisitStmt_(const WhileNode *op) {
+  // Capture statements emitted by the condition at the loop body's indent.
+  std::ostringstream condition_stream;
+  int condition_scope = BeginScope();
+  stream.swap(condition_stream);
+  std::string cond = RemoveOutermostParentheses(PrintExpr_(op->condition));
+  stream.swap(condition_stream);
+  EndScope(condition_scope);
+  std::string condition_statements = condition_stream.str();
+
+  if (condition_statements.empty()) {
+    PrintIndent();
+    stream << "while " << cond << ":\n";
+    int while_scope = BeginScope();
+    PrintStmt_(op->body);
+    EndScope(while_scope);
+    return;
+  }
+
+  // Evaluate the condition at the start of each iteration. A loop-carried
+  // flag exits after a failed check without requiring a dynamic break.
+  std::string active = name_supply_->FreshName("_while_active");
+  PrintIndent();
+  stream << active << " = cutlass.Boolean(True)\n";
+  PrintIndent();
+  stream << "while " << active << ":\n";
+  int while_scope = BeginScope();
+  stream << condition_statements;
+  PrintIndent();
+  stream << active << " = cutlass.Boolean(" << cond << ")\n";
+  PrintIndent();
+  stream << "if " << active << ":\n";
+  int body_scope = BeginScope();
+  PrintStmt_(op->body);
+  EndScope(body_scope);
+  EndScope(while_scope);
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {

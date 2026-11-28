@@ -5,6 +5,55 @@ import pytest
 import tilelang.testing
 
 
+def _chained_comparison_rng_kernels(guard):
+    @T.prim_func
+    def chained(O: T.Tensor((2, 2), "int64")):
+        with T.Kernel(2, threads=1) as gate:
+            T.rng_init(1234567, 0)
+            if guard == "none":
+                valid = 0 <= T.cast(T.rng_rand(), "uint64") < (1 << 32)
+            elif guard == "chain":
+                valid = 0 < gate <= T.cast(T.rng_rand(), "uint64") + 1 < ((1 << 32) + 1)
+            else:
+                valid = gate > 0 and (0 <= T.cast(T.rng_rand(), "uint64") < (1 << 32))
+            O[gate, 0] = T.cast(valid, "int64")
+            O[gate, 1] = T.cast(T.rng_rand(), "int64")
+
+    @T.prim_func
+    def explicit(O: T.Tensor((2, 2), "int64")):
+        with T.Kernel(2, threads=1) as gate:
+            T.rng_init(1234567, 0)
+            if guard == "none" or gate > 0:
+                value = T.cast(T.rng_rand(), "uint64")
+                O[gate, 0] = T.cast(0 <= value < (1 << 32), "int64")
+            else:
+                O[gate, 0] = 0
+            O[gate, 1] = T.cast(T.rng_rand(), "int64")
+
+    return chained, explicit
+
+
+def _check_chained_comparison_rng(guard, target):
+    chained, explicit = _chained_comparison_rng_kernels(guard)
+    actual = torch.empty((2, 2), dtype=torch.int64, device="cuda")
+    expected = torch.empty_like(actual)
+    tilelang.compile(chained, target=target)(actual)
+    tilelang.compile(explicit, target=target)(expected)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("guard", ["none", "chain", "and"])
+def test_chained_comparison_rng(guard):
+    _check_chained_comparison_rng(guard, "cuda")
+
+
+@tilelang.testing.requires_cutedsl
+@pytest.mark.parametrize("guard", ["chain", "and"])
+def test_chained_comparison_rng_cutedsl(guard):
+    _check_chained_comparison_rng(guard, "cutedsl")
+
+
 @tilelang.jit
 def tilelang_rand_1d(M=1024, seed=42, generator="curandStatePhilox4_32_10_t"):
     num_per_thread = 128

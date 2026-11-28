@@ -819,16 +819,46 @@ class Builder(BaseBuilder):
         else:
             return super().aug_assign_slice(op, target, sl, aug_value)
 
+    def compare_chain(self, left, steps):
+        def with_operand(value, use):
+            if isinstance(value, PrimExpr) and side_effect(value) > CallEffectKind.ReadState.value:
+                var = Var("cmp_operand", value.dtype)
+                return tvm.tirx.Let(var, value, use(var))
+            return use(value)
+
+        def compare_next(left, index):
+            compare, next_operand = steps[index]
+            right = next_operand()
+            if index == len(steps) - 1:
+                return compare(left, right)
+            return with_operand(right, lambda right: self.boolop("And", compare(left, right), lambda: compare_next(right, index + 1)))
+
+        # An expression binding keeps a stateful operand in its evaluation scope,
+        # including inside a short-circuit branch or a while condition.
+        return with_operand(left, lambda left: compare_next(left, 0))
+
     def boolop(self, op, left, right=None):
         left = unwrap_cond(left)
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
-                if op == "And":
-                    return tirx.And(left, right())
-                if op == "Or":
-                    return tirx.Or(left, right())
                 if op == "Not":
                     return tirx.Not(left)
+                if op == "And" or op == "Or":
+                    assert right is not None
+                    rhs = right()
+                    if isinstance(rhs, (EqualOp, NotEqualOp)):
+                        rhs = rhs.asobject()
+                    # An And/Or operand may emit statements during codegen
+                    # (e.g. a Let binding). Keep those in the conditional arm.
+                    if (
+                        isinstance(rhs, PrimExpr)
+                        and rhs.dtype == left.dtype == "bool"
+                        and side_effect(rhs) > CallEffectKind.ReadState.value
+                    ):
+                        if op == "And":
+                            return tirx.if_then_else(left, rhs, False)
+                        return tirx.if_then_else(left, True, rhs)
+                    return (tirx.And if op == "And" else tirx.Or)(left, rhs)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)

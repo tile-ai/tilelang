@@ -693,17 +693,14 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
         node = self.generic_visit(node)
-        left = node.left
-        split = []
+        if len(node.ops) == 1:
+            return node
+        steps = []
         for op, comp in zip(node.ops, node.comparators):
-            cmp = ast.Compare(left=left, ops=[op], comparators=[comp])
-            ast_set_span(cmp, ast_get_span(node))
-            split.append(cmp)
-            left = comp
-        last = split[-1]
-        for i in reversed(range(len(split) - 1)):
-            last = quote_expr("__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
-        return last
+            pair = ast.Compare(left=ast.Name(id="lhs", ctx=ast.Load()), ops=[op], comparators=[ast.Name(id="rhs", ctx=ast.Load())])
+            compare = quote_expr("lambda lhs, rhs: pair", pair=pair, span=node)
+            steps.append(quote_expr("(compare, lambda: operand)", compare=compare, operand=comp, span=node))
+        return quote_expr("__tb.compare_chain(left, steps)", left=node.left, steps=ast.Tuple(elts=steps, ctx=ast.Load()), span=node)
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.expr:
         node = self.generic_visit(node)
