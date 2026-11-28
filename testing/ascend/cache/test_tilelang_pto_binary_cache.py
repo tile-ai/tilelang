@@ -48,8 +48,11 @@ def _patch_callback(monkeypatch, compile_calls, toolchain=None):
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
     monkeypatch.setattr(pto_toolchain, "compile_ptodsl_to_aibin", _fake_pto_compile(compile_calls))
     if toolchain is None:
-        toolchain = {"ptoas": "ptoas test", "cann": "cann test"}
-    monkeypatch.setattr(pto_toolchain, "toolchain_stamp", lambda: dict(toolchain))
+        toolchain = {}
+    monkeypatch.setattr(pto_toolchain.shutil, "which", lambda name: "/tools/ptoas")
+    monkeypatch.setattr(pto_toolchain, "_ptoas_version", lambda path: toolchain.get("ptoas", "ptoas test"))
+    monkeypatch.setattr(pto_toolchain, "_cann_identity", lambda: toolchain.get("cann", "cann test"))
+    monkeypatch.setattr(pto_toolchain.bisheng, "get_bisheng_version", lambda: toolchain.get("bisheng", "bisheng test"))
     return ascend_backend.tilelang_callback_pto_compile
 
 
@@ -86,29 +89,36 @@ def test_pto_binary_cache_hit_skips_toolchain(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
-@pytest.mark.parametrize(
-    ("old_toolchain", "new_toolchain"),
-    [
-        ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.68", "cann": "/cann-a (9.1.0)"}),
-        ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.67", "cann": "/cann-b (9.2.0)"}),
-    ],
-    ids=["ptoas-upgrade", "cann-change"],
-)
-def test_pto_binary_cache_separates_toolchain_identities(monkeypatch, tmp_path, old_toolchain, new_toolchain):
-    """Each stamp field participates in the key: a one-field change misses, restoring the old stamp reuses the first entry."""
+@pytest.mark.parametrize("backend", ["tvm_ffi", "pto"])
+@pytest.mark.parametrize("component", ["ptoas", "cann", "bisheng"])
+def test_pto_binary_cache_separates_toolchain_identities(monkeypatch, tmp_path, backend, component):
+    """Changing one tool invalidates both caches. Restoring it reuses the original entry."""
+    from tilelang.cache import _resolve_cache_dispatch
+    from tvm import tirx
+
     _set_cache_dirs(monkeypatch, tmp_path)
     target = Target({"kind": "ascend"})
     source = "from ptodsl import pto\n"
 
+    cache, context, _ = _resolve_cache_dispatch("pto", None, backend, False)
+    func = tirx.PrimFunc([], tirx.Evaluate(0))
+
+    def full_kernel_key():
+        return cache.lookup(func=func, out_idx=None, backend_context=context, pass_configs={}, compile_flags=None)[0]
+
     compile_calls = []
-    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
-    first = compile_old(source, target)
+    toolchain = {}
+    compile_pto = _patch_callback(monkeypatch, compile_calls, toolchain)
+    first_key = full_kernel_key()
+    first = compile_pto(source, target)
 
-    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain=new_toolchain)
-    compile_new(source, target)
+    toolchain[component] = "upgraded"
+    assert full_kernel_key() != first_key
+    compile_pto(source, target)
 
-    compile_old_again = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
-    restored = compile_old_again(source, target)
+    del toolchain[component]
+    assert full_kernel_key() == first_key
+    restored = compile_pto(source, target)
 
     assert bytes(restored) == bytes(first)
     assert len(compile_calls) == 2

@@ -2877,10 +2877,20 @@ void CodeGenTileLangPTO::EmitLocalVarInitialization_(const Buffer &buffer,
     return;
   }
   if (dtype.lanes() > 1) {
-    // Mutable vector registers start as a vreg descriptor placeholder; the
-    // first actual store overwrites it with a real vector value.
-    stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
-           << DataTypeName(dtype.element_of()) << ")\n";
+    if (!inside_simtvf_body_ && dtype.lanes() == 256 &&
+        dtype.element_of().is_bool()) {
+      // Ordinary SIMD boolx256 slots need a mask placeholder: PTOAS now
+      // materializes vreg initializers as SSA, where vreg<256xi1> is invalid.
+      // This compatibility fix assumes an unconditional assignment replaces
+      // the placeholder before use, as in DeepGEMM's grouped scale transform.
+      // TODO: Normalize physical mask types across assignments and control-flow
+      // merges; a b8 placeholder cannot merge with a b16/b32 mask as-is.
+      stream << vid << " = pto.unspecified_value(pto.mask_type(\"b8\"))\n";
+    } else {
+      // The first actual store overwrites the initial vector value.
+      stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
+             << DataTypeName(dtype.element_of()) << ")\n";
+    }
     RegisterHandleType_(buffer->data.get(), dtype);
     EmitMixedEntrySnapshot(buffer->data.get());
     return;
@@ -8221,6 +8231,29 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
   int entry_pad_value_id = current_copy_pad_value_id_;
   DataType entry_pad_value_dtype = current_copy_pad_value_dtype_;
 
+  std::set<std::string> carried_locals;
+  tirx::PostOrderVisit(op->body, [&](const ObjectRef &node) {
+    const auto *store = node.as<BufferStoreNode>();
+    if (store == nullptr) {
+      return;
+    }
+    const Buffer &buffer = store->buffer;
+    const VarNode *var = buffer->data.get();
+    if (!local_var_buffers_.count(var) || !var_idmap_.count(var) ||
+        buffer->dtype.is_vector()) {
+      return;
+    }
+    std::string name = GetVarID(var);
+    // CANN 9.2's PTODSL can miss a while input that is reassigned in the
+    // body. A bare Python name read makes a preceding if yield the scalar's
+    // entry value without emitting a device operation.
+    if (carried_locals.insert(name).second && !buffer->dtype.is_handle() &&
+        !FindVmiAllocSlot_(buffer.get(), "PTO while input")) {
+      PrintIndent();
+      stream << name << "\n";
+    }
+  });
+
   PrintIndent();
   stream << "while " << PrintCondition(op->condition) << ":\n";
   int while_scope = BeginScope();
@@ -8253,17 +8286,6 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
   // PTODSL's native-while rewrite needs a value to be carried when it is
   // assigned on some iterations and read after the loop. Materialize a
   // read/write on every iteration for local.var values already in scope.
-  std::set<std::string> carried_locals;
-  tirx::PostOrderVisit(op->body, [&](const ObjectRef &node) {
-    const auto *store = node.as<BufferStoreNode>();
-    if (store == nullptr)
-      return;
-    const VarNode *var = store->buffer->data.get();
-    if (local_var_buffers_.count(var) && var_idmap_.count(var) &&
-        !store->buffer->dtype.is_vector()) {
-      carried_locals.insert(GetVarID(var));
-    }
-  });
   for (const std::string &name : carried_locals) {
     PrintIndent();
     stream << name << " = " << name << "\n";

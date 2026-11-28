@@ -29,8 +29,8 @@ def validate_host_mapped_params(func, target, execution_backend, out_idx=None) -
     indices = get_host_mapped_params(func)
     if not indices:
         return indices
-    if target.kind.name != "cuda" or execution_backend not in ("cython", "tvm_ffi"):
-        raise ValueError("Host-mapped buffers currently require target='cuda' and execution_backend='cython' or 'tvm_ffi'")
+    if target.kind.name not in ("cuda", "ascend") or execution_backend not in ("cython", "tvm_ffi"):
+        raise ValueError("Host-mapped buffers currently require target='cuda' or 'ascend' and execution_backend='cython' or 'tvm_ffi'")
     outputs = out_idx if out_idx is not None else func.attrs.get("tilelang_out_idx", [])
     if isinstance(outputs, int):
         outputs = [outputs]

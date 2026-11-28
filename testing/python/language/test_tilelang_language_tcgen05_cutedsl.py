@@ -13,19 +13,6 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 
-
-def _is_cutedsl_available():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-        return True
-    except (ImportError, AssertionError):
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
-
 _PASS_CONFIGS = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 # (name, shape, tmem forward fn, threads, wrapper the copies must use)
@@ -65,7 +52,7 @@ def _make_roundtrip_kernel(shape, forward, threads):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
@@ -130,7 +117,7 @@ def _make_ts_gemm_kernel(M, N, K):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize("M", [64, 128], ids=["m64", "m128"])

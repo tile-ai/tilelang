@@ -8,15 +8,6 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _roundtrip_kernel(N: int, load_policy: str, store_policy: str):
     """Explicit TMA copies, since a plain T.copy of a small tile may not use TMA."""
 
@@ -41,10 +32,9 @@ def _roundtrip_kernel(N: int, load_policy: str, store_policy: str):
     "load_policy, store_policy",
     [("evict_first", "evict_last"), ("evict_last", "evict_first")],
 )
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_eviction_cutedsl(load_policy, store_policy):
-    _require_cutedsl()
     N = 32
     mod = tilelang.compile(_roundtrip_kernel(N, load_policy, store_policy), out_idx=[1], target="cutedsl")
 

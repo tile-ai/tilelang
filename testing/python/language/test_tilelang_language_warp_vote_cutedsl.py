@@ -25,17 +25,7 @@ import tilelang.testing
 FULL_MASK = 0xFFFFFFFF
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _compile(func, **kwargs):
-    _require_cutedsl()
     return tilelang.compile(func, target="cutedsl", **kwargs)
 
 
@@ -66,7 +56,7 @@ def kernel_any_all_sync():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_any_all_sync():
     kernel = _compile(kernel_any_all_sync())
     src = kernel.get_kernel_source()
@@ -99,7 +89,7 @@ def kernel_ballot():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_ballot():
     kernel = _compile(kernel_ballot())
     src = kernel.get_kernel_source()
@@ -128,7 +118,7 @@ def kernel_activemask():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_activemask():
     kernel = _compile(kernel_activemask())
     src = kernel.get_kernel_source()
@@ -158,7 +148,7 @@ def kernel_ffs():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_ffs():
     kernel = _compile(kernel_ffs())
     src = kernel.get_kernel_source()
@@ -207,7 +197,7 @@ def kernel_fns():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_fns():
     kernel = _compile(kernel_fns())
     src = kernel.get_kernel_source()
@@ -240,7 +230,7 @@ def kernel_syncthreads_reduce():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_syncthreads_reduce():
     kernel = _compile(kernel_syncthreads_reduce())
     src = kernel.get_kernel_source()
@@ -275,7 +265,7 @@ def kernel_match():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_match():
     kernel = _compile(kernel_match())
     src = kernel.get_kernel_source()
@@ -323,7 +313,7 @@ def kernel_named_barrier_arrive():
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_named_barrier_arrive():
     kernel = _compile(kernel_named_barrier_arrive(), out_idx=[1])
     src = kernel.get_kernel_source()
@@ -350,7 +340,7 @@ def kernel_bool_bitwise_not():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_bool_bitwise_not():
     kernel = _compile(kernel_bool_bitwise_not(), out_idx=[1])
     src = kernel.get_kernel_source()
@@ -383,7 +373,7 @@ def kernel_thread_allreduce_sum(threads, dtype):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("threads", [8, 32, 64])
 @pytest.mark.parametrize("dtype", ["int8", "int16"])
 def test_thread_allreduce_buffer_tree(threads, dtype):
