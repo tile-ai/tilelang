@@ -73,12 +73,18 @@ class PassConfigKey(str, Enum):
     Default: True.
 
     - True (default): the compiler may assume the operands and the result are
-      not NaN and may ignore signed-zero differences, so a floating-point
-      ``T.min``/``T.max`` lowers to the direct VMI instruction
-      (``vmin``/``vmax``, or ``vmins``/``vmaxs`` against a lane-uniform scalar).
+      not NaN and may ignore signed-zero differences. A lane-varying operand
+      (vector/vector, or vector against a lane-uniform scalar) then lowers to the
+      direct VMI instruction (``vmin``/``vmax``, or ``vmins``/``vmaxs`` against a
+      lane-uniform scalar).
     - False: keeps the ordered comparison plus ``Select`` lowering, where an
       unordered comparison (a NaN operand) or an equal-zero comparison selects
       the right operand, at the cost of one compare plus one select.
+
+    Two lane-uniform scalar operands never become a vector instruction, whatever
+    this option says: an integer pair and a compile-time constant float pair keep
+    the scalar form, while a **runtime** float pair is rejected by
+    ``VerifyParallelToPTO`` (there is no scalar float ALU inside ``SIMD_VF``).
 
     Integer ``Min``/``Max`` always use the direct instruction: integer
     comparison has no NaN or signed-zero ambiguity. Under the relaxed form,

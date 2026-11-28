@@ -173,9 +173,9 @@ public:
     SBlockNode *node = block.CopyOnWrite();
     // A realized block's initializer is a statement position of its own: it
     // runs before the body and carries access predicates too, so it needs the
-    // same clearing. Verify admits those predicates, so a survivor here means
-    // the two passes disagree.
-    if (op->init.defined()) {
+    // same clearing -- under the same condition as the body. A block without an
+    // automatic unit is not rewritten, and its initializer stays untouched.
+    if (op->init.defined() && !scan.units.empty()) {
       node->init = NormalizePredicates(op->init.value());
     }
     node->body = body;
@@ -635,31 +635,60 @@ public:
     return expansion;
   }
 
-  // Every symbol the folded condition mentions. Collected conservatively: a
-  // condition that constrains `row` through any expression makes the guard a
-  // candidate reason for the access to fit.
+  // The coordinates the folded condition *compares*, i.e. the symbols whose
+  // range the guard narrows. A symbol that only appears inside a buffer access
+  // does not count: `a[K] > 0` tests the loaded value, it does not bound `K`.
+  class CoordinateSymbols : public tirx::ExprVisitor {
+  public:
+    explicit CoordinateSymbols(std::set<const VarNode *> *out) : out_(out) {}
+    // The value of a load is not a constraint on any coordinate it indexes.
+    void VisitExpr_(const tirx::BufferLoadNode *) final {}
+    void VisitExpr_(const tirx::VarNode *op) final { out_->insert(op); }
+
+  private:
+    std::set<const VarNode *> *out_;
+  };
+
   std::set<const VarNode *> ConditionSymbols(const PrimExpr &condition) {
     std::set<const VarNode *> symbols;
     std::set<const VarNode *> expanded;
     std::function<void(const PrimExpr &)> collect = [&](const PrimExpr &expr) {
-      PostOrderVisit(expr, [&](const ObjectRef &node) {
-        const auto *var = node.as<VarNode>();
-        if (var == nullptr) {
-          return;
-        }
+      if (const auto *and_node = expr.as<AndNode>()) {
+        collect(and_node->a);
+        collect(and_node->b);
+        return;
+      }
+      if (const auto *or_node = expr.as<OrNode>()) {
+        collect(or_node->a);
+        collect(or_node->b);
+        return;
+      }
+      if (const auto *not_node = expr.as<NotNode>()) {
+        collect(not_node->a);
+        return;
+      }
+      PrimExpr lhs;
+      PrimExpr rhs;
+      if (pto::MatchRelational(expr, &lhs, &rhs) != nullptr) {
+        CoordinateSymbols collector(&symbols);
+        collector(lhs);
+        collector(rhs);
+        return;
+      }
+      // A bare scalar bool (`if flag`) is itself the constraint; analyse its
+      // definition the same way so `flag = row < 2` keeps constraining `row`.
+      if (const auto *var = expr.as<VarNode>()) {
         symbols.insert(var);
-        if (!expanded.insert(var).second) {
-          return;
+        if (expanded.insert(var).second) {
+          auto it = guard_bind_env_.find(GetRef<Var>(var));
+          if (it != guard_bind_env_.end()) {
+            collect((*it).second);
+          }
         }
-        // `if flag` must inherit the dependencies of `flag`'s definition: the
-        // guard is what bounds the access even when the condition only names a
-        // Bool Bind. A Var with no recorded definition is a kernel parameter or
-        // a loop coordinate, which carries no memory dependency.
-        auto it = guard_bind_env_.find(GetRef<Var>(var));
-        if (it != guard_bind_env_.end()) {
-          collect((*it).second);
-        }
-      });
+        return;
+      }
+      CoordinateSymbols collector(&symbols);
+      collector(expr);
     };
     collect(condition);
     return symbols;
@@ -919,19 +948,26 @@ public:
         [this, &collect_reads](const std::vector<PlanTask> &seq) {
           const size_t k = seq.size();
           std::vector<TaskMask> pred(k, TaskMask(k));
+          // One read footprint and one used-Var set per task: the RAW/WAR and
+          // Bind-definition checks below reuse them instead of walking seq[j]
+          // again for every earlier task. The dependency graph is unchanged.
+          std::vector<std::vector<LoadCollector::Location>> reads(k);
+          std::vector<std::set<const VarNode *>> used_vars(k);
           for (size_t i = 0; i < k; ++i) {
-            const auto reads_i = collect_reads(seq[i]);
+            reads[i] = collect_reads(seq[i]);
+            PostOrderVisit(seq[i].stmt, [&](const ObjectRef &node) {
+              if (const auto *var = node.as<VarNode>()) {
+                used_vars[i].insert(var);
+              }
+            });
+          }
+          for (size_t i = 0; i < k; ++i) {
+            const auto &reads_i = reads[i];
             for (size_t j = i + 1; j < k; ++j) {
-              const auto reads_j = collect_reads(seq[j]);
+              const auto &reads_j = reads[j];
               bool dep = false;
               if (const auto *bind_i = seq[i].stmt.as<BindNode>()) {
-                PostOrderVisit(seq[j].stmt, [&](const ObjectRef &node) {
-                  if (const auto *v = node.as<VarNode>()) {
-                    if (v == bind_i->var.get()) {
-                      dep = true;
-                    }
-                  }
-                });
+                dep = used_vars[j].count(bind_i->var.get()) != 0;
               }
               if (seq[i].store.defined() && seq[j].store.defined() &&
                   MayConflict(seq[i].store->buffer, seq[j].store->buffer)) {

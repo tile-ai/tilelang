@@ -894,6 +894,43 @@ def test_symbolic_extent_outside_the_condition_still_folds():
     assert _selects(stages["legalize"]), "the guard must become a value choice"
 
 
+def _k_guard_tests_a_value_at_a_runtime_index(E=128, lanes=64, width=512):
+    """The guard loads through a runtime symbol; it does not bound it.
+
+    `a[K] > 0` tests the loaded value, so the guard says nothing about `K`'s
+    range. The offset window `i + 8 * K` therefore stays the caller's contract
+    and the fold must be admitted.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((width,), "float32"),
+        K: T.int32,
+        Y: T.Tensor((width,), "float32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((width,), "float32")
+            y = T.alloc_shared((width,), "float32")
+            T.copy(A, a)
+            T.fill(y, T.float32(0.0))
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if a[K] > T.float32(0.0):
+                        y[i + 8 * K] = a[i]
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_guard_value_test_does_not_bound_the_index_symbol():
+    """A value test is not a range constraint, so the runtime window still folds."""
+    stages, error = _lower_capture(_k_guard_tests_a_value_at_a_runtime_index())
+    assert error is None, f"a guard that only tests a value must not bound the index, got: {error}"
+    assert not _if_then_elses(stages["legalize"]), "the guard must be folded away"
+    assert _selects(stages["legalize"]), "the guard must become a value choice"
+
+
 def _k_guard_bounds_a_symbolic_extent_with_an_offset(lanes=128):
     """`y: (n,)` with a runtime offset: the guard bounds only the extent.
 

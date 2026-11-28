@@ -14,8 +14,10 @@ Expected contract after this stage:
   span fidelity is not asserted here;
 * the shell keeps its UB round-trip: a value read and written inside the loop
   stays in its shared buffer and every iteration loads and stores it. The
-  per-lane register promotion an earlier draft assumed is not implemented -- the
-  current PTOAS inserts no automatic mem_bar, so that form is not order-safe;
+  per-lane register promotion an earlier draft assumed is not implemented; the
+  ordering between one iteration's store and the next iteration's load comes
+  from the `VST_VLD` barrier the backend inserts, so the round-trip stays
+  order-safe;
 * a shell without a memory-carried value (no buffer both read and written
   inside the loop) is preserved as-is;
 * a shell whose bounds reference the lane variable, a variable bound inside the
@@ -199,7 +201,7 @@ def test_inside_serial_shell_is_preserved(E, lanes, tail):
 
     vec = str(stages["vectorize"])
     # No carry promotion any more: the carrier keeps round-tripping through UB
-    # and the ordering comes from the backend mem_bar (verify writes the value).
+    # and the ordering comes from the backend `VST_VLD` mem_bar it inserts.
     assert "_carry" not in vec, "the carry promotion is retired"
     shells = _serial_shells_named(stages["vectorize"], "_t")
     assert shells, "the serial shell must survive vectorization"
@@ -207,9 +209,7 @@ def test_inside_serial_shell_is_preserved(E, lanes, tail):
     # captured shell body, so a tail conversion that dropped the store fails
     # here instead of only failing the `remaining` shape check.
     shell_body = str(shells[0].body)
-    assert "vstore" in shell_body, (
-        f"the in-shell carrier store must stay inside the shell body, got {shell_body[:200]}"
-    )
+    assert "vstore" in shell_body, f"the in-shell carrier store must stay inside the shell body, got {shell_body[:200]}"
 
     if tail:
         assert "remaining" in vec, "the tail path must keep its remaining counter"
