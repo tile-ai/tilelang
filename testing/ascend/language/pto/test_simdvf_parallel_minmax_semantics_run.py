@@ -42,8 +42,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.environ["TILELANG_DISABLE_DATA_RACE_CHECK"] = "1"
-
 import tilelang
 import tilelang.ascend.language as T
 
@@ -99,15 +97,35 @@ def _ref(a, b, op):
 _KERNELS = {}
 
 
+@contextlib.contextmanager
+def _without_data_race_check():
+    """Scope the race-check override to kernel compilation, then restore it.
+
+    Setting it at import time would leak into the whole pytest process (and
+    overwrite a caller's explicit value) even when every test is skipped.
+    """
+    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
+    saved = os.environ.get(key)
+    os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
+
+
 def _kernel(relaxed):
     """Compile one kernel per configuration: a device compile dominates cost."""
     if relaxed not in _KERNELS:
-        _KERNELS[relaxed] = tilelang.compile(
-            _build(),
-            target="pto",
-            out_idx=-1,
-            pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
-        )
+        with _without_data_race_check():
+            _KERNELS[relaxed] = tilelang.compile(
+                _build(),
+                target="pto",
+                out_idx=-1,
+                pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
+            )
     return _KERNELS[relaxed]
 
 
@@ -157,6 +175,10 @@ def test_zero_pair_sign_handling(relaxed):
     a = np.array([pos, neg] * (E // 2), dtype=np.float32)
     b = np.array([neg, pos] * (E // 2), dtype=np.float32)
     got = _run(a, b, relaxed)
+    # The value must be zero, not merely signed: `min = -1` / `max = +1` would
+    # also satisfy the sign checks below.
+    for op, row in (("min", 0), ("max", 1)):
+        assert np.all(got[row] == np.float32(0.0)), f"{op}: a zero pair must return zero, got {got[row][:4]}"
     if relaxed:
         assert np.signbit(got[0][0]) and np.signbit(got[0][1]), "min must return -0 for a zero pair"
         assert not np.signbit(got[1][0]) and not np.signbit(got[1][1]), "max must return +0 for a zero pair"

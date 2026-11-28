@@ -397,22 +397,23 @@ public:
   }
 
   // A guard may be the only reason an access stays inside its buffer (a guard
-  // such as `i < 64` covering the first chunk of a two-chunk unit). The fold
-  // evaluates both arms, and the synthesized store, for every iteration, so an
-  // access that leaves its buffer for the iterations where the guard is false
-  // makes the rewrite illegal -- reads included: `if i < 64: y[i] = a[i] else:
-  // y[i] = 0` reads `a[64..127]` after the fold even though those lanes select
-  // the constant.
-  bool AccessMayLeaveBounds(const Stmt &arm) {
+  // such as `i < 64` covering the first chunk of a two-chunk unit, or `row < 2`
+  // on a runtime row index). The fold evaluates both arms, and the synthesized
+  // store, for every iteration, so an access that leaves its buffer for the
+  // iterations where the guard is false makes the rewrite illegal -- reads
+  // included: `if i < 64: y[i] = a[i] else: y[i] = 0` reads `a[64..127]` after
+  // the fold even though those lanes select the constant.
+  bool AccessMayLeaveBounds(const Stmt &arm, const PrimExpr &condition) {
     bool leaves = false;
     PostOrderVisit(arm, [&](const ObjectRef &node) {
       if (leaves) {
         return;
       }
       if (const auto *store = node.as<BufferStoreNode>()) {
-        leaves = IndicesMayLeaveBuffer(store->buffer, store->indices);
+        leaves =
+            IndicesMayLeaveBuffer(store->buffer, store->indices, condition);
       } else if (const auto *load = node.as<BufferLoadNode>()) {
-        leaves = IndicesMayLeaveBuffer(load->buffer, load->indices);
+        leaves = IndicesMayLeaveBuffer(load->buffer, load->indices, condition);
       }
     });
     return leaves;
@@ -424,16 +425,19 @@ public:
   // 128..191 inside a 192-element allocation, and a physical range does not say
   // which logical index left the view.
   bool IndicesMayLeaveBuffer(const Buffer &buffer,
-                             const Array<PrimExpr> &indices) {
+                             const Array<PrimExpr> &indices,
+                             const PrimExpr &condition) {
     if (indices.size() != buffer->shape.size()) {
       return false;
     }
     // A bound wider than the int32 coordinate range cannot come from a loop
     // coordinate: it comes from an unconstrained runtime symbol (or from an
-    // overflowed bound computation). Such an axis follows the program's own
-    // contract -- pinning the symbol would test one address, not the ones it
-    // can take -- so it is skipped and the remaining axes are still judged.
+    // overflowed bound computation). Such an axis normally follows the
+    // program's own contract -- pinning the symbol would test one address, not
+    // the ones it can take -- so it is skipped and the remaining axes are still
+    // judged.
     const int64_t kRuntimeBound = int64_t{1} << 31;
+    const std::set<const VarNode *> constrained = ConditionSymbols(condition);
     for (size_t axis = 0; axis < indices.size(); ++axis) {
       const auto *dim = buffer->shape[axis].as<IntImmNode>();
       if (dim == nullptr) {
@@ -441,11 +445,33 @@ public:
         // scanning so a static axis can still prove an overflow.
         continue;
       }
+      // Scalar `Bind` values in scope are known expressions, not opaque
+      // symbols: expand them so `r = row + 1` is judged as `row + 1`.
+      const PrimExpr index = predicate_env_.empty()
+                                 ? indices[axis]
+                                 : Substitute(indices[axis], predicate_env_);
       const arith::ConstIntBound bound =
-          predicate_analyzer_.const_int_bound(indices[axis]);
+          predicate_analyzer_.const_int_bound(index);
       if (bound->min_value <= -kRuntimeBound ||
           bound->max_value >= kRuntimeBound) {
-        continue; // runtime-driven axis: the program's contract
+        // Unprovable. Accepting is the caller's contract *only* while the
+        // folded condition does not restrict the symbols that make the range
+        // unprovable: the fold evaluates the access for every lane, so an
+        // address that fits only under the guard must not become
+        // unconditional. `if 0 <= row < 2: y[row, i] = 1` on a (2, 64) buffer
+        // is the case: `row = 2` never accessed the buffer in the source.
+        for (const VarNode *symbol : UnresolvedSymbols(index)) {
+          if (constrained.count(symbol) != 0) {
+            out_of_bounds_detail_ =
+                "buffer `" + std::string(buffer->name) + "` axis " +
+                std::to_string(axis) + " uses runtime symbol `" +
+                symbol->name_hint +
+                "` that the folded condition constrains; the guard is the only "
+                "reason this access fits";
+            return true;
+          }
+        }
+        continue; // runtime-driven axis, not guarded: the program's contract
       }
       if (bound->min_value < 0 || bound->max_value >= dim->value) {
         out_of_bounds_detail_ =
@@ -454,6 +480,40 @@ public:
       }
     }
     return false;
+  }
+
+  // Symbols inside `expr` whose own range the analyzer cannot bound: kernel
+  // parameters and other unconstrained runtime values. A loop coordinate never
+  // lands here, because every enclosing loop binds its range.
+  std::set<const VarNode *> UnresolvedSymbols(const PrimExpr &expr) {
+    std::set<const VarNode *> symbols;
+    const int64_t kRuntimeBound = int64_t{1} << 31;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      const auto *var = node.as<VarNode>();
+      if (var == nullptr || symbols.count(var) != 0) {
+        return;
+      }
+      const arith::ConstIntBound bound =
+          predicate_analyzer_.const_int_bound(GetRef<Var>(var));
+      if (bound->min_value <= -kRuntimeBound ||
+          bound->max_value >= kRuntimeBound) {
+        symbols.insert(var);
+      }
+    });
+    return symbols;
+  }
+
+  // Every symbol the folded condition mentions. Collected conservatively: a
+  // condition that constrains `row` through any expression makes the guard a
+  // candidate reason for the access to fit.
+  std::set<const VarNode *> ConditionSymbols(const PrimExpr &condition) {
+    std::set<const VarNode *> symbols;
+    PostOrderVisit(condition, [&](const ObjectRef &node) {
+      if (const auto *var = node.as<VarNode>()) {
+        symbols.insert(var);
+      }
+    });
+    return symbols;
   }
 
   std::string DescribeOutOfBounds(const Buffer &buffer, size_t axis,
@@ -486,8 +546,9 @@ public:
     }
     // The same applies to memory, reads and writes alike: a guard is allowed to
     // be the only thing keeping an access in bounds, and the fold drops it.
-    if (AccessMayLeaveBounds(then_case) ||
-        (else_case.defined() && AccessMayLeaveBounds(else_case.value()))) {
+    if (AccessMayLeaveBounds(then_case, op->condition) ||
+        (else_case.defined() &&
+         AccessMayLeaveBounds(else_case.value(), op->condition))) {
       Fail("a guarded access can leave its buffer for iterations where the "
            "guard is false; folding would evaluate that read or write "
            "unconditionally (" +

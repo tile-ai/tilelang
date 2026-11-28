@@ -277,7 +277,10 @@ def test_if_else_legalizes_to_select_without_residual_branch():
     assert not _if_then_elses(nested_legalized), "nested conditionals must be legalized away"
     assert len(_selects(nested_legalized)) >= 2, "the nested predicates must become nested Selects"
     nested_names = _vmi_call_names(nested["vectorize"])
-    assert nested_names.get("tl.vmi.vcmp", 0) >= 2, f"both comparisons must lower to vcmp, got {nested_names}"
+    nested_compares = nested_names.get("tl.vmi.vcmp", 0) + nested_names.get("tl.vmi.vcmps", 0)
+    # A lane-varying operand makes the compare `vcmps` or `vcmp` depending on
+    # the operand order; both are the same comparison, so count the pair.
+    assert nested_compares >= 2, f"both comparisons must lower to vcmp/vcmps, got {nested_names}"
     assert "tl.vmi.vsel" in nested_names, "the Selects must lower to vsel"
 
 
@@ -633,6 +636,82 @@ def _k_shifted_runtime_window(E=128, lanes=64, width=128):
             T.copy(y, Y)
 
     return main
+
+
+def _k_guard_bound_runtime_row(E=64, lanes=64, rows=2):
+    """A runtime row index that the guard alone keeps in range."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E,), "float32"),
+        Y: T.Tensor((rows, E), "float32"),
+        row: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((rows, E), "float32")
+            T.copy(A, a)
+            T.copy(Y, y)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if (row >= 0) & (row < rows):
+                        y[row, i] = T.float32(1.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_guard_bound_runtime_row_is_rejected():
+    """`if 0 <= row < 2: y[row, i] = 1` on a (2, 64) buffer.
+
+    Folding would evaluate `y[row, i]` (and its read-back) for every lane, so
+    `row = 2` -- where the source touches nothing -- becomes an out-of-bounds
+    read and write. The guard is the only reason the access fits, so the fold
+    must be rejected.
+    """
+    _, error = _lower_capture(_k_guard_bound_runtime_row(), expect_error=True)
+    assert error is not None, "a guard-bounded runtime row index must not be folded"
+    message = str(error)
+    assert "runtime symbol `row`" in message, f"expected the guard diagnostic, got: {message}"
+    assert "axis 0" in message, f"the row axis is the offending one, got: {message}"
+    assert "the folded condition constrains" in message, f"expected the guard reason, got: {message}"
+
+
+def _k_guard_on_a_symbol_outside_the_index(E=64, lanes=64, rows=2):
+    """The guard constrains `row`, but every destination index is static."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E,), "float32"),
+        Y: T.Tensor((rows, E), "float32"),
+        row: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((rows, E), "float32")
+            T.copy(A, a)
+            T.copy(Y, y)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if (row >= 0) & (row < rows):
+                        y[0, i] = T.float32(1.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_guard_on_a_symbol_outside_the_index_still_folds():
+    """The guard mentions `row`, but the store index is the constant row 0.
+
+    Dropping the guard cannot widen any access: `y[0, i]` is valid for every
+    lane, so the fold stays legal and must not be rejected by the new rule.
+    """
+    stages, error = _lower_capture(_k_guard_on_a_symbol_outside_the_index())
+    assert error is None, f"a static destination under a runtime guard must fold, got: {error}"
+    assert not _if_then_elses(stages["legalize"]), "the guard must be folded away"
+    assert _selects(stages["legalize"]), "the guard must become a value choice"
 
 
 @pytest.mark.pto
@@ -1207,7 +1286,10 @@ def test_boolean_mask_value_lowers_to_vand():
     names = _vmi_call_names(stages["vectorize"])
     assert names.get("tl.vmi.vand") == 1, f"vand must be emitted once, got {names}"
     assert "tl.vmi.vsel" in names, "the guarded Select must lower to vsel"
-    assert names.get("tl.vmi.vcmp", 0) >= 2, "both comparisons must lower to vcmp"
+    compares = names.get("tl.vmi.vcmp", 0) + names.get("tl.vmi.vcmps", 0)
+    # Vector-vs-scalar compares lower to `vcmps`, vector-vs-vector to `vcmp`;
+    # both are the same comparison, so count the pair.
+    assert compares >= 2, f"both comparisons must lower to vcmp/vcmps, got {names}"
 
     # The boolean combine is the existing PTODSL bitwise vector op on mask
     # registers, so the emitted PTODSL name equals the TileLang op name.
@@ -1374,10 +1456,13 @@ def test_conditional_interleaved_destination_is_rejected_at_verify():
 
     _, error = _lower_capture(_k_conditional_interleaved_destination(), expect_error=True)
     assert error is not None, "an interleaved destination must be rejected"
-    # The access check runs before the pairing contract, so an interleaved
-    # address is reported as a non-continuous one (the more precise diagnostic).
+    # The access pattern check belongs to Verify: it runs before the pairing
+    # contract, so an interleaved address must be reported there as a
+    # non-continuous one. Accepting a Legalize-side failure would let a Verify
+    # regression hide behind the later stage.
     message = str(error)
-    assert "continuous" in message or "cannot pair" in message, f"expected an address diagnostic, got: {message}"
+    assert message.startswith("[VerifyParallelToPTO]"), f"Verify must own this rejection, got: {message}"
+    assert "cannot prove the address is continuous" in message, f"expected the continuity diagnostic, got: {message}"
 
 
 def _k_plain_offset_destination(E=150, lanes=128, dtype="float32"):
@@ -1808,10 +1893,24 @@ def test_one_sided_multi_in_place_shares_one_entry_condition_snapshot():
     condition = snapshots[0].var
     selects = _selects(legalized)
     assert len(selects) == 2, f"both destinations need a value choice: {selects}"
+    value_choices = [st for st in _stores(legalized) if isinstance(st.value, tvm.tirx.Select)]
+    assert len(value_choices) == 2, f"each destination needs its own value choice: {value_choices}"
     for select in selects:
         assert select.condition.same_as(condition), "the second store must reuse the entry condition, not re-read A"
-        # A one-sided arm keeps the destination's old value on the false side.
-        assert isinstance(select.false_value, tvm.tirx.BufferLoad), "the false side of a one-sided value choice reads the destination back"
+    for store in value_choices:
+        # A one-sided arm keeps the destination's old value on the false side,
+        # which must be this very destination: a constant (or any other
+        # address) would silently change the untouched lanes.
+        false_value = store.value.false_value
+        assert isinstance(false_value, tvm.tirx.BufferLoad), (
+            f"the false side of a one-sided value choice reads the destination back, got {false_value}"
+        )
+        assert false_value.buffer.same_as(store.buffer), (
+            f"the read-back must use the store's buffer, got {false_value.buffer.name} for {store.buffer.name}"
+        )
+        assert tvm.ir.structural_equal(false_value.indices, store.indices), (
+            f"the read-back must use the store's indices, got {false_value.indices} for {store.indices}"
+        )
 
 
 def _k_nested_condition_after_write(E=256, lanes=64):
@@ -2802,10 +2901,18 @@ def test_bool_snapshot_before_a_write_is_not_provable():
     func = _k_plain_two_stores()
     load_buf, _ = _ub_buffers(func)
     index = tvm.tirx.IntImm("int32", 0)
+
+    def fresh_compare():
+        return tvm.tirx.GT(tvm.tirx.BufferLoad(load_buf, [index]), tvm.tirx.const(0.0, "float32"))
+
+    # Compare the snapshot with a *fresh* read of its source. If the proof
+    # re-expanded the Bind, this predicate becomes `x == x` and is admitted
+    # without re-reading memory, so the test would fail; an opaque snapshot
+    # cannot be proven equal after the write, which is the behaviour under test.
     scene = _snapshot_predicate_scene(
         func,
-        tvm.tirx.GT(tvm.tirx.BufferLoad(load_buf, [index]), tvm.tirx.const(0.0, "float32")),
-        lambda old: old,
+        fresh_compare(),
+        lambda old: tvm.tirx.EQ(old, fresh_compare()),
     )
     _, error = _lower_capture(scene, expect_error=True)
     assert error is not None, "a bool snapshot must not be re-read as its source"

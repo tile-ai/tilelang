@@ -227,6 +227,73 @@ def test_runtime_bound_shell_is_admitted_and_preserved(builder, carried):
     assert "_carry" not in vec, "no carry pattern here: nothing to promote"
 
 
+def _k_shell_carried_store(E, lanes):
+    """A shell that stores one value per lane: the canvas for the proof test."""
+
+    P = (E + lanes - 1) // lanes * lanes
+
+    @T.prim_func
+    def main(X: T.Tensor((P,), "float32"), Y: T.Tensor((P,), "float32")):
+        with T.Kernel(1):
+            x_ub = T.alloc_shared((P,), "float32")
+            y_ub = T.alloc_shared((P,), "float32")
+            T.copy(X, x_ub)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    for _t in T.serial(4):
+                        y_ub[i] = x_ub[i]
+            T.copy(y_ub, Y)
+
+    return main
+
+
+def _with_shell_dependent_index(mod):
+    """Rewrite the shell's store index to `i * (1 + k // 4)`.
+
+    The frontend and Legalize both reduce that expression (`k < 4`), so the
+    vectorizer's proof is exercised directly: the address is lane continuous
+    only while the shell's range is known.
+    """
+
+    func = next(iter(mod.functions.values()))
+    shell = {}
+
+    def find_shell(node):
+        if isinstance(node, tvm.tirx.For) and node.loop_var.name == "_t":
+            shell["var"] = node.loop_var
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, find_shell)
+    assert "var" in shell, "the serial shell must be present in the legalized module"
+
+    def rewrite(node):
+        if isinstance(node, tvm.tirx.BufferStore) and node.buffer.name == "y_ub":
+            index = tvm.tirx.Mul(node.indices[0], 1 + shell["var"] // 4)
+            return tvm.tirx.BufferStore(node.buffer, node.value, [index])
+        return None
+
+    body = tvm.tirx.stmt_functor.ir_transform(func.body, None, rewrite)
+    return tvm.IRModule({"main": func.with_body(body)})
+
+
+@pytest.mark.pto
+def test_vectorize_binds_the_shell_range_before_proving_an_address():
+    """Vectorize must bind the shell range exactly as Verify does.
+
+    Legalize already simplifies such an index, so the pass is fed the
+    unsimplified form: without the binding the continuity proof sees an
+    unconstrained `k` and rejects a unit Verify admitted.
+    """
+    stages, error = _lower_capture(_k_shell_carried_store(256, 64))
+    assert error is None, f"the shell must lower, got: {error}"
+
+    mutated = _with_shell_dependent_index(stages["legalize"])
+    target = normalize_pto_target("pto")
+    with target:
+        vectorized = ascend_transform.VectorizeParallelToPTO()(mutated)
+    assert _serial_shells_named(vectorized, "_t"), "the shell must survive vectorization"
+    assert "vstore" in str(vectorized), "the destination must still be stored"
+
+
 @contextmanager
 def _ghost_extent_hook():
     """Rewrite the admitted serial shell's extent into a never-defined Var.

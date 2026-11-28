@@ -758,6 +758,15 @@ private:
       Array<Stmt> inner;
       Map<Var, PrimExpr> saved_env = bind_env_;
       Map<Var, Var> saved_map = value_map_;
+      // Bind the shell range exactly as Verify does before it checks the body.
+      // Without it the access proof sees an unconstrained induction variable,
+      // so an address such as `y[i * (1 + k // 4)]` (constant because `k < 4`)
+      // fails continuity here although Verify admitted it. The binding is kept:
+      // the induction variable is a fresh object per shell, so the fact can
+      // never apply to a later expression.
+      analyzer_.Bind(loop->loop_var,
+                     Range::FromMinExtent(loop->min, loop->extent),
+                     /*allow_override=*/true);
       ConvertBody(loop->body, &inner);
       bind_env_ = std::move(saved_env);
       value_map_ = std::move(saved_map);

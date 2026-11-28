@@ -33,8 +33,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.environ["TILELANG_DISABLE_DATA_RACE_CHECK"] = "1"
-
 import tilelang
 import tilelang.ascend.language as T
 
@@ -60,10 +58,30 @@ def _dev():
     return torch.device("npu")
 
 
+@contextlib.contextmanager
+def _without_data_race_check():
+    """Scope the race-check override to kernel compilation, then restore it.
+
+    Setting it at import time would leak into the whole pytest process (and
+    overwrite a caller's explicit value) even when every test is skipped.
+    """
+    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
+    saved = os.environ.get(key)
+    os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
+
+
 @lru_cache(maxsize=None)
 def _compile_builder(builder):
     """Compile each builder once: a device compile dominates the test cost."""
-    return tilelang.compile(builder(), target="pto")
+    with _without_data_race_check():
+        return tilelang.compile(builder(), target="pto")
 
 
 def _build_runtime_shells():
