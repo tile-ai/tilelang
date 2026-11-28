@@ -80,6 +80,9 @@ struct BoundedDMACopyRanges {
  *
  * Pairs non-singleton axes between src and dst (swapping the trailing two for a
  * transposed copy) and shrinks any axis whose range exceeds the buffer shape.
+ * A singleton axis is one whose extent is provably at most one, including a
+ * symbolic trailing tile such as `Min(1, n)`, so both sides stay aligned even
+ * when only one of them carries the clamped form.
  * Each paired non-singleton tile origin is required to start in bounds
  * (`0 <= min < shape`); only the upper end of the tile may exceed its shape.
  * Negative or fully out-of-bounds non-singleton origins are outside this
