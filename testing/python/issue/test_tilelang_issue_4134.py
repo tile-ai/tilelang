@@ -54,5 +54,31 @@ def test_macro_tensor_annotation_under_future_annotations():
     assert add is not None
 
 
+def test_macro_explicitly_quoted_ref_annotation_under_future_annotations():
+    # With future annotations, `x: "T.Ref"` stores the source text '"T.Ref"'
+    # (quotes included). get_type_hints must resolve the nested string all the
+    # way to the Ref class so macro_arg passes the argument by reference;
+    # otherwise `x += 1` would silently rebind a local copy instead of
+    # storing into the caller's buffer.
+    @T.macro
+    def add_one(x: "T.Ref"):
+        x += 1
+
+    @T.prim_func
+    def main(A: T.Tensor((1,), "int32")):
+        with T.Kernel(1):
+            add_one(A[0])
+
+    assert isinstance(main, tvm.tirx.PrimFunc)
+    stores = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        main.body,
+        lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None,
+    )
+    # The augmented assignment must reach the caller's buffer A.
+    assert len(stores) == 1
+    assert stores[0].buffer.name == "A"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

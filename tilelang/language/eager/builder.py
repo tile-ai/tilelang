@@ -1173,7 +1173,17 @@ def get_type_hints(func):
             # results on CPython != 3.11 and breaks decoration under
             # `from __future__ import annotations` (issue #4134). Evaluate the
             # annotation expression directly instead.
-            hints[name] = eval(value, globalns, localns)
+            resolved = eval(value, globalns, localns)
+            # An explicitly quoted annotation (e.g. x: "T.Ref") under future
+            # annotations is stored as '"T.Ref"' and evaluates to the inner
+            # string 'T.Ref'. Keep resolving string results to the underlying
+            # object so Ref hints reach macro_arg's reference handling. The
+            # `seen` guard stops self-referential names from looping forever.
+            seen = {value}
+            while isinstance(resolved, str) and resolved not in seen:
+                seen.add(resolved)
+                resolved = eval(resolved, globalns, localns)
+            hints[name] = resolved
         else:
             hints[name] = value
     return hints
