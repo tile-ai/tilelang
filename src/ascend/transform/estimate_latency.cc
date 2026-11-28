@@ -2066,7 +2066,10 @@ private:
     constr_stack_ = outer_ctx.constrs_;
   }
 
-  bool InScheduleBody() const { return schedule_body_depth_ > 0; }
+  // Collect() is only ever handed the schedule body itself (the tilelang_root
+  // body), so the traversal never leaves it: every For/Evaluate/BufferStore/
+  // Bind/While/SBlock the collector reaches is unmarked work that
+  // MaterializeScheduleUnits has not normalized.
 
   std::shared_ptr<TaskNode> NewTask(const Stmt &stmt) const {
     auto task = std::make_shared<TaskNode>();
@@ -2146,10 +2149,6 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
     if (op->kind == ForKind::kSerial || op->kind == ForKind::kUnrolled) {
       ConstrVisitor::VisitStmt_(op);
       return;
@@ -2158,49 +2157,29 @@ private:
                       "MaterializeScheduleUnits");
   }
 
-  void VisitStmt_(const EvaluateNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
+  void VisitStmt_(const EvaluateNode *) final {
     FatalUnmarkedTask("EstimateLatency", "Evaluate",
                       "MaterializeScheduleUnits");
   }
 
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
+  void VisitStmt_(const BufferStoreNode *) final {
     FatalUnmarkedTask("EstimateLatency", "BufferStore",
                       "MaterializeScheduleUnits");
   }
 
-  void VisitStmt_(const BindNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
+  void VisitStmt_(const BindNode *) final {
     FatalUnmarkedTask("EstimateLatency", "Bind", "MaterializeScheduleUnits");
   }
 
-  void VisitStmt_(const WhileNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
+  void VisitStmt_(const WhileNode *) final {
     FatalUnmarkedTask("EstimateLatency", "While", "MaterializeScheduleUnits");
   }
 
-  void VisitStmt_(const SBlockNode *op) final {
+  void VisitStmt_(const SBlockNode *) final {
     FatalUnmarkedTask("EstimateLatency", "block", "MaterializeScheduleUnits");
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
     if (op->attr_key == tl::attr::kAscendTask) {
       EstimateMarkedTask(op);
       return;
@@ -2214,7 +2193,6 @@ private:
 
   TaskCostEstimator estimator_;
   TaskCostMap costs_;
-  int schedule_body_depth_{1};
   int per_core_task_depth_{0};
   std::vector<PerCoreTaskCandidate> per_core_task_candidates_;
 };

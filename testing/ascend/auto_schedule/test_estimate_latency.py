@@ -5,6 +5,9 @@ import tilelang
 import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
 from tilelang import tvm
+from tvm import tirx
+from testing.ascend._ir import copy, kernel, seq
+from testing.ascend.auto_schedule._scheduled_ir import unit
 from testing.ascend.auto_schedule._task_utils import (
     _bind_target,
     _collect_schedule_units,
@@ -516,6 +519,39 @@ def test_task_cost_arguments_are_validated():
         _make_program(latency=1, ii=2)
     with pytest.raises(tvm.error.InternalError, match="greater than or equal to ii"):
         ascend_transform.EstimateLatency()(_materialize_schedule_units(_bind_target(_make_program(latency=0))))
+
+
+@pytest.mark.parametrize(
+    "unmarked",
+    [
+        "evaluate",
+        "buffer_store",
+        "parallel_loop",
+    ],
+)
+def test_estimate_latency_rejects_unmarked_schedule_body_statements(unmarked):
+    # TaskCostCollector always traverses the schedule body (the tilelang_root
+    # body) itself, so statements MaterializeScheduleUnits has not wrapped in
+    # a T.Task marker must stay fatal instead of being traversed silently.
+    a = tirx.decl_buffer((4, 64), "float32", name="A")
+    c = tirx.decl_buffer((4, 64), "float32", name="C")
+    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
+    if unmarked == "evaluate":
+        raw = copy(ub, c, dst_indices=[0, 0], dst_shape=[1, 64])
+    elif unmarked == "buffer_store":
+        raw = tirx.BufferStore(ub, ub[0] + 1, [0])
+    else:
+        i = tirx.Var("i", "int32")
+        raw = tirx.For(i, 0, 4, tirx.ForKind.PARALLEL, tirx.Evaluate(0))
+    body = seq(
+        unit(copy(a, ub, src_indices=[0, 0], src_shape=[1, 64]), core=5),
+        raw,
+    )
+    with pytest.raises(
+        tvm.error.InternalError,
+        match="Run tl.transform.MaterializeScheduleUnits before EstimateLatency",
+    ):
+        ascend_transform.EstimateLatency()(kernel(body, buffers=[ub], params=[a, c]))
 
 
 if __name__ == "__main__":
