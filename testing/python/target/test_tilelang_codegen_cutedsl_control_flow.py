@@ -14,10 +14,14 @@ from tilelang.engine.lower import lower
 @tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_stateful_local_var_initializer():
     @T.prim_func
-    def main(O: T.Tensor((1,), "int32"), gate: T.int32):
+    def main(O: T.Tensor((1,), "int32")):
         with T.Kernel(1, threads=1):
             value = T.alloc_var("bool")
-            T.sblock_attr({"tl.local_var_init": T.if_then_else(gate > 0, T.call_extern("bool", "test_flag"), False)})
+            # Keep the predicate dynamic without a launch parameter that is
+            # only referenced from the allocation annotation.
+            T.sblock_attr(
+                {"tl.local_var_init": T.if_then_else(T.call_pure_extern("bool", "test_gate"), T.call_extern("bool", "test_flag"), False)}
+            )
             O[0] = T.cast(value, "int32")
 
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
