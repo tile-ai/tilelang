@@ -2,6 +2,11 @@
 
 #include <stdint.h>
 
+// Imported code may define asc_load_dev before including this header.
+#pragma push_macro("asc_load_dev")
+#undef asc_load_dev
+#include "tl_templates/ascend/cann_compat.h"
+
 namespace tl {
 
 // Scalar GM access that bypasses the per-core DCache. AscendC::{Read,Write}
@@ -12,6 +17,7 @@ namespace tl {
 
 template <typename T>
 __aicore__ inline T read_gm_bypass_dcache(__gm__ T *addr) {
+  using ::tl::cann::sdk::asc_load_dev;
   static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
                     sizeof(T) == 8,
                 "read_gm_bypass_dcache only supports 1/2/4/8-byte scalar "
@@ -53,3 +59,5 @@ __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
 }
 
 } // namespace tl
+
+#pragma pop_macro("asc_load_dev")

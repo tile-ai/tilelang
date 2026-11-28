@@ -2,9 +2,11 @@
 
 #include <type_traits>
 
-#include "c_api/asc_simd.h"
+#include "tl_templates/ascend/cann_compat.h"
 
 namespace simd_inst {
+TL_CANN_USE_SIMD_NAMES
+
 template <typename T> struct vec {};
 
 template <> struct vec<float> {
