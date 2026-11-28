@@ -142,9 +142,10 @@ def test_invalid_loop():
 
 
 def test_valid_loop():
-    valid_loop_not_use_loop_var()
-    valid_loop_not_frag()
-    valid_loop_serial()
+    target = tilelang.backend.target.determine_target("auto", return_object=True)
+    with target:
+        for kernel in (valid_loop_not_use_loop_var, valid_loop_not_frag, valid_loop_serial):
+            tilelang.lower(kernel.get_tir(), target=target)
 
 
 if __name__ == "__main__":

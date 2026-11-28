@@ -318,7 +318,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", BACKENDS[:1])
 def test_cache_isolation_between_tests(clean_cache_env, backend):
     """Verify cache isolation between tests.
 

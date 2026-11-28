@@ -1,205 +1,76 @@
-from typing import Optional
-
+import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang.rocm.target import check_hip_availability
-
-_IS_HIP_AVAILABLE = check_hip_availability()
-_DEFAULT_WARPS_PER_GROUP = 4
 
 
-def _resolve_warp_size(warp_size: Optional[int]) -> int:
-    if warp_size is not None:
-        return int(warp_size)
-    return 64 if _IS_HIP_AVAILABLE else 32
-
-
-def _resolve_warps_per_group(warps_per_group: Optional[int]) -> int:
-    if warps_per_group is not None:
-        return int(warps_per_group)
-    return _DEFAULT_WARPS_PER_GROUP
-
-
-@tilelang.jit(out_idx=[-1])
-def _get_laneid_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
+def _all_warp_info_kernel():
     @T.prim_func
-    def laneid_kernel(A: T.Tensor((num_threads,), T.int32)):
-        with T.Kernel(1, threads=num_threads) as _:
+    def main(
+        A0: T.Tensor((128,), T.int32),
+        A1: T.Tensor((256,), T.int32),
+        A2: T.Tensor((128,), T.int32),
+        A3: T.Tensor((256,), T.int32),
+        A4: T.Tensor((128,), T.int32),
+        A5: T.Tensor((320,), T.int32),
+        A6: T.Tensor((128,), T.int32),
+        A7: T.Tensor((512,), T.int32),
+        A8: T.Tensor((256,), T.int32),
+        A9: T.Tensor((128,), T.int32),
+    ):
+        with T.Kernel(1, threads=128):
             tx = T.get_thread_binding()
-            A[tx] = T.get_lane_idx(warp_size)
-
-    return laneid_kernel
-
-
-@tilelang.jit(out_idx=[-1])
-def _get_warp_idx_sync_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
-    @T.prim_func
-    def warp_idx_sync_kernel(A: T.Tensor((num_threads,), T.int32)):
-        with T.Kernel(1, threads=num_threads) as _:
+            A0[tx] = T.get_lane_idx(None)
+        with T.Kernel(1, threads=256):
             tx = T.get_thread_binding()
-            A[tx] = T.get_warp_idx_sync(warp_size)
-
-    return warp_idx_sync_kernel
-
-
-@tilelang.jit(out_idx=[-1])
-def _get_warp_idx_kernel(num_threads: int = 128, warp_size: Optional[int] = None):
-    @T.prim_func
-    def warp_idx_kernel(A: T.Tensor((num_threads,), T.int32)):
-        with T.Kernel(1, threads=num_threads) as _:
+            A1[tx] = T.get_lane_idx(64)
+        with T.Kernel(1, threads=128):
             tx = T.get_thread_binding()
-            A[tx] = T.get_warp_idx(warp_size)
-
-    return warp_idx_kernel
-
-
-@tilelang.jit(out_idx=[-1])
-def _get_warp_group_idx_kernel(
-    num_threads: int = 128,
-    warp_size: Optional[int] = None,
-    warps_per_group: Optional[int] = None,
-):
-    @T.prim_func
-    def warp_group_idx_kernel(A: T.Tensor((num_threads,), T.int32)):
-        with T.Kernel(1, threads=num_threads) as _:
+            A2[tx] = T.get_warp_idx_sync(None)
+        with T.Kernel(1, threads=256):
             tx = T.get_thread_binding()
-            A[tx] = T.get_warp_group_idx(warp_size, warps_per_group)
-
-    return warp_group_idx_kernel
-
-
-@tilelang.jit(out_idx=[-1])
-def _shuffle_elect_kernel(num_threads: int = 128, thread_extent: int = 64):
-    @T.prim_func
-    def shuffle_elect_kernel(A: T.Tensor((num_threads,), T.int32)):
-        with T.Kernel(1, threads=num_threads) as _:
+            A3[tx] = T.get_warp_idx_sync(16)
+        with T.Kernel(1, threads=128):
             tx = T.get_thread_binding()
-            elected = T.shuffle_elect(thread_extent)
-            A[tx] = elected
+            A4[tx] = T.get_warp_idx(None)
+        with T.Kernel(1, threads=320):
+            tx = T.get_thread_binding()
+            A5[tx] = T.get_warp_idx(20)
+        with T.Kernel(1, threads=128):
+            tx = T.get_thread_binding()
+            A6[tx] = T.get_warp_group_idx(None, None)
+        with T.Kernel(1, threads=512):
+            tx = T.get_thread_binding()
+            A7[tx] = T.get_warp_group_idx(32, 5)
+        with T.Kernel(1, threads=256):
+            tx = T.get_thread_binding()
+            A8[tx] = T.shuffle_elect(64)
+        with T.Kernel(1, threads=128):
+            tx = T.get_thread_binding()
+            A9[tx] = T.shuffle_elect(0)
 
-    return shuffle_elect_kernel
-
-
-def run_get_lane_id(num_threads: int = 128, warp_size: Optional[int] = None):
-    kernel = _get_laneid_kernel(num_threads, warp_size)
-    A = kernel()
-    print(kernel.get_kernel_source())
-    print(A)
-    expected_warp_size = _resolve_warp_size(warp_size)
-    ref = torch.arange(num_threads, dtype=A.dtype, device=A.device) % expected_warp_size
-    torch.testing.assert_close(A.cpu(), ref.cpu())
-    return A
-
-
-def run_get_warp_idx_sync(num_threads: int = 128, warp_size: Optional[int] = None):
-    kernel = _get_warp_idx_sync_kernel(num_threads, warp_size)
-    A = kernel()
-    print(kernel.get_kernel_source())
-    print(A)
-    expected_warp_size = _resolve_warp_size(warp_size)
-    ref = torch.arange(num_threads, dtype=A.dtype, device=A.device) // expected_warp_size
-    torch.testing.assert_close(A.cpu(), ref.cpu())
-    return A
-
-
-def run_get_warp_idx(num_threads: int = 128, warp_size: Optional[int] = None):
-    kernel = _get_warp_idx_kernel(num_threads, warp_size)
-    A = kernel()
-    print(kernel.get_kernel_source())
-    print(A)
-    expected_warp_size = _resolve_warp_size(warp_size)
-    ref = torch.arange(num_threads, dtype=A.dtype, device=A.device) // expected_warp_size
-    torch.testing.assert_close(A.cpu(), ref.cpu())
-    return A
-
-
-def run_get_warp_group_idx(
-    num_threads: int = 128,
-    warp_size: Optional[int] = None,
-    warps_per_group: Optional[int] = None,
-):
-    kernel = _get_warp_group_idx_kernel(num_threads, warp_size, warps_per_group)
-    A = kernel()
-    print(kernel.get_kernel_source())
-    print(A)
-    expected_warp_size = _resolve_warp_size(warp_size)
-    expected_warps_per_group = _resolve_warps_per_group(warps_per_group)
-    threads_per_group = expected_warp_size * expected_warps_per_group
-    if threads_per_group <= 0:
-        raise ValueError("threads_per_group must be positive.")
-    ref = torch.arange(num_threads, dtype=A.dtype, device=A.device) // threads_per_group
-    torch.testing.assert_close(A.cpu(), ref.cpu())
-    return A
-
-
-def run_shuffle_elect(num_threads: int = 128, thread_extent: int = 64):
-    if thread_extent < 0:
-        raise ValueError("thread_extent must be non-negative.")
-    kernel = _shuffle_elect_kernel(num_threads, thread_extent)
-    A = kernel()
-    print(kernel.get_kernel_source())
-    print(A)
-    indices = torch.arange(num_threads, device=A.device, dtype=torch.int64)
-    if thread_extent == 0:
-        mask = indices == 0
-    elif thread_extent > 0:
-        mask = (indices % thread_extent) == 0
-    else:
-        mask = torch.zeros_like(indices, dtype=torch.bool)
-    ref = mask.to(dtype=A.dtype, device=A.device)
-    torch.testing.assert_close(A.cpu(), ref.cpu())
-    return A
+    return main
 
 
 @tilelang.testing.requires_cuda
-def test_get_lane_idx_default():
-    run_get_lane_id()
-
-
-@tilelang.testing.requires_cuda
-def test_get_lane_idx_custom():
-    run_get_lane_id(num_threads=256, warp_size=64)
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_idx_sync_default():
-    run_get_warp_idx_sync()
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_idx_sync_custom():
-    run_get_warp_idx_sync(num_threads=256, warp_size=16)
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_idx_default():
-    run_get_warp_idx()
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_idx_custom():
-    run_get_warp_idx(num_threads=320, warp_size=20)
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_group_idx_default():
-    run_get_warp_group_idx()
-
-
-@tilelang.testing.requires_cuda
-def test_get_warp_group_idx_custom():
-    run_get_warp_group_idx(num_threads=512, warp_size=32, warps_per_group=5)
-
-
-@tilelang.testing.requires_cuda
-def test_shuffle_elect_default():
-    run_shuffle_elect(num_threads=256, thread_extent=64)
-
-
-@tilelang.testing.requires_cuda
-def test_shuffle_elect_block_leader():
-    run_shuffle_elect(num_threads=128, thread_extent=0)
+def test_get_warp_info():
+    kernel = tilelang.compile(_all_warp_info_kernel(), out_idx=list(range(10)))
+    results = kernel()
+    indices = [torch.arange(size, dtype=torch.int32, device="cuda") for size in (128, 256, 128, 256, 128, 320, 128, 512, 256, 128)]
+    expected = [
+        indices[0] % 32,
+        indices[1] % 64,
+        indices[2] // 32,
+        indices[3] // 16,
+        indices[4] // 32,
+        indices[5] // 20,
+        indices[6] // (32 * 4),
+        indices[7] // (32 * 5),
+        (indices[8] % 64 == 0).to(torch.int32),
+        (indices[9] == 0).to(torch.int32),
+    ]
+    for result, reference in zip(results, expected):
+        torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

@@ -489,40 +489,59 @@ def test_codegen_auto_vec_half_types(op_key, dtype_name):
 # ===================================================================
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype_name", _DTYPES)
-@pytest.mark.parametrize("op_name,op_func", _BINARY_OPS, ids=[n for n, _ in _BINARY_OPS])
-def test_correctness_binary(op_name, op_func, dtype_name):
-    """Binary ops produce correct results for all dtypes."""
-    dtype_tl, dtype_torch = _DTYPE_MAP[dtype_name]
-    func = _make_binary_kernel(op_func, dtype_tl)
-    kernel = tilelang.compile(func, out_idx=[2], target="cuda")
-    a = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
-    b = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
-    c = kernel(a, b)
-    ref = _TORCH_REFS[op_name](a, b)
-    torch.testing.assert_close(c, ref)
+def _make_all_ops_kernel(dtype_tl):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M * 2,), dtype=dtype_tl),
+        B: T.Tensor((M * 2,), dtype=dtype_tl),
+        C: T.Tensor((M * 2,), dtype=dtype_tl),
+        D0: T.Tensor((M * 2,), dtype=dtype_tl),
+        D1: T.Tensor((M * 2,), dtype=dtype_tl),
+        D2: T.Tensor((M * 2,), dtype=dtype_tl),
+        D3: T.Tensor((M * 2,), dtype=dtype_tl),
+        D4: T.Tensor((M * 2,), dtype=dtype_tl),
+        D5: T.Tensor((M * 2,), dtype=dtype_tl),
+        D6: T.Tensor((M * 2,), dtype=dtype_tl),
+    ):
+        outputs = [D0, D1, D2, D3, D4]
+        for output, (_, op_func) in zip(outputs, _BINARY_OPS):
+            with T.Kernel(1, 1, threads=M):
+                tid = T.get_thread_binding()
+                idx = T.Ramp(tid * 2, 1, 2)
+                output[idx] = op_func(A[idx], B[idx])
+        with T.Kernel(1, 1, threads=M):
+            tid = T.get_thread_binding()
+            idx = T.Ramp(tid * 2, 1, 2)
+            D5[idx] = T.fma2(A[idx], B[idx], C[idx])
+        with T.Kernel(1, 1, threads=M):
+            tid = T.get_thread_binding()
+            idx = T.Ramp(tid * 2, 1, 2)
+            D6[idx] = T.abs2(A[idx])
+
+    return main
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype_name", _DTYPES)
-def test_correctness_fma2(dtype_name):
-    """fma2 produces correct results for all dtypes."""
+def test_correctness_packed_ops(dtype_name):
     dtype_tl, dtype_torch = _DTYPE_MAP[dtype_name]
-    func = _make_ternary_kernel(T.fma2, dtype_tl)
-    kernel = tilelang.compile(func, out_idx=[3], target="cuda")
+    kernel = tilelang.compile(_make_all_ops_kernel(dtype_tl), out_idx=[3, 4, 5, 6, 7, 8, 9], target="cuda")
     a = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
     b = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
     c = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
-    d = kernel(a, b, c)
-    ref = _TORCH_REFS["fma2"](a, b, c)
+    results = kernel(a, b, c)
+    for (op_name, _), result in zip(_BINARY_OPS, results):
+        torch.testing.assert_close(result, _TORCH_REFS[op_name](a, b))
+
+    fma_ref = _TORCH_REFS["fma2"](a, b, c)
     # Hardware FMA fuses multiply-add into a single rounding step, so it can
     # differ from the separate mul+add reference by up to 1 ULP.  Use relaxed
     # tolerances for 16-bit types.
     if dtype_name == "float32":
-        torch.testing.assert_close(d, ref)
+        torch.testing.assert_close(results[5], fma_ref)
     else:
-        torch.testing.assert_close(d, ref, atol=1e-2, rtol=1e-1)
+        torch.testing.assert_close(results[5], fma_ref, atol=1e-2, rtol=1e-1)
+    torch.testing.assert_close(results[6], _TORCH_REFS["abs2"](a))
 
 
 @tilelang.testing.requires_cuda
@@ -589,19 +608,6 @@ def test_correctness_auto_vec_batched_reduce_f32_workspace():
     a = torch.randn((4, 512), device="cuda", dtype=torch.float32)
     result = kernel(a)
     torch.testing.assert_close(result, torch.sum(a, dim=1), atol=1e-4, rtol=1e-4)
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype_name", _DTYPES)
-def test_correctness_abs2(dtype_name):
-    """abs2 produces correct results for all dtypes."""
-    dtype_tl, dtype_torch = _DTYPE_MAP[dtype_name]
-    func = _make_unary_kernel(T.abs2, dtype_tl)
-    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
-    a = torch.randn(M * 2, device="cuda", dtype=dtype_torch)
-    c = kernel(a)
-    ref = _TORCH_REFS["abs2"](a)
-    torch.testing.assert_close(c, ref)
 
 
 if __name__ == "__main__":

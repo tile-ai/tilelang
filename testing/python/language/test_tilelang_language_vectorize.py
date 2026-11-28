@@ -168,35 +168,55 @@ def test_vectorize_local_invariant_store_accumulate():
     run_vectorize_invariant_store_accumulate(vectorize_local_invariant_store_accumulate)
 
 
-@tilelang.jit
-def vectorize_test_all_dtypes(dtype, vec_num):
+_VECTORIZE_DTYPES = [
+    T.uint8,
+    T.uint64,
+    T.int8,
+    T.int64,
+    T.float8_e4m3fn,
+    T.float8_e5m2,
+    T.float8_e8m0fnu,
+]
+
+
+def _vectorize_all_dtypes_kernel(vec_num):
     @T.prim_func
-    def main(A: T.Tensor[(64,), dtype]):
-        with T.Kernel(1, threads=256):
-            for i in T.vectorized(vec_num):
-                A[i] = T.cast(i + 1, dtype)
+    def main(
+        A0: T.Tensor((64,), T.uint8),
+        A1: T.Tensor((64,), T.uint64),
+        A2: T.Tensor((64,), T.int8),
+        A3: T.Tensor((64,), T.int64),
+        A4: T.Tensor((64,), T.float8_e4m3fn),
+        A5: T.Tensor((64,), T.float8_e5m2),
+        A6: T.Tensor((64,), T.float8_e8m0fnu),
+    ):
+        outputs = [A0, A1, A2, A3, A4, A5, A6]
+        for output, dtype in zip(outputs, _VECTORIZE_DTYPES):
+            with T.Kernel(1, threads=256):
+                for i in T.vectorized(vec_num):
+                    output[i] = T.cast(i + 1, dtype)
 
     return main
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.uint8,
-        torch.uint64,
-        torch.int8,
-        torch.int64,
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-        torch.float8_e8m0fnu,
-    ],
-)
 @pytest.mark.parametrize("vec_num", [1, 2, 4, 8])
-def test_vectorize_all_dtypes(dtype, vec_num):
-    x = torch.empty((64,), dtype=dtype, device="cuda")
-    kernel = vectorize_test_all_dtypes(dtype, vec_num)
-    kernel(x)
+def test_vectorize_all_dtypes(vec_num):
+    kernel = tilelang.compile(_vectorize_all_dtypes_kernel(vec_num), target="cuda")
+    results = [torch.zeros((64,), dtype=dtype.as_torch(), device="cuda") for dtype in _VECTORIZE_DTYPES]
+    kernel(*results)
+    for dtype, result in zip(_VECTORIZE_DTYPES, results):
+        torch_dtype = dtype.as_torch()
+        values = torch.arange(1, vec_num + 1, device="cuda", dtype=torch.int64)
+        expected = torch.zeros((64,), dtype=torch_dtype, device="cuda")
+        expected[:vec_num] = values.to(torch_dtype)
+        if dtype == T.float8_e8m0fnu:
+            # CUDA and PyTorch round non-representable e8m0 values differently.
+            exact = (values & (values - 1)) == 0
+            torch.testing.assert_close(result[:vec_num][exact], expected[:vec_num][exact], rtol=0, atol=0)
+            torch.testing.assert_close(result[vec_num:], expected[vec_num:], rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 @tilelang.jit

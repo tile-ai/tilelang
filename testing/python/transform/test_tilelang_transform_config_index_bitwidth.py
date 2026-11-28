@@ -2,6 +2,7 @@ import math
 
 import tilelang
 import tilelang.language as T
+from tilelang import tvm as tvm
 
 
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
@@ -156,9 +157,9 @@ def test_sta_attention():
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
     program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
-    kernel = tilelang.compile(program, out_idx=[4], pass_configs={"tl.config_index_bitwidth": 64})
-
-    cuda_source = kernel.get_kernel_source()
+    target = tilelang.backend.target.determine_target("auto", return_object=True)
+    with tvm.transform.PassContext(config={"tl.config_index_bitwidth": 64}), target:
+        cuda_source = tilelang.lower(program, target=target).kernel_source
 
     assert "int64_t" in cuda_source
 

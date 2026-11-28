@@ -1,28 +1,65 @@
 # type: ignore
-import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang.language.fp8 import determine_fp8_type
 
 
-def debug_print_buffer(M=16, N=16, dtype=T.float16):
+def test_debug_print_buffer():
     @T.prim_func
-    def program(Q: T.Tensor((M, N), dtype)):
-        with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
-            shared_buf = T.alloc_shared([M, N], dtype)
-            T.print(shared_buf)
+    def program():
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_int8 = T.alloc_shared([16, 16], T.int8)
+            T.print(shared_buf_int8)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_int16 = T.alloc_shared([16, 16], T.int16)
+            T.print(shared_buf_int16)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_int32 = T.alloc_shared([16, 16], T.int32)
+            T.print(shared_buf_int32)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_int64 = T.alloc_shared([16, 16], T.int64)
+            T.print(shared_buf_int64)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_uint8 = T.alloc_shared([16, 16], T.uint8)
+            T.print(shared_buf_uint8)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_uint16 = T.alloc_shared([16, 16], T.uint16)
+            T.print(shared_buf_uint16)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_uint32 = T.alloc_shared([16, 16], T.uint32)
+            T.print(shared_buf_uint32)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_uint64 = T.alloc_shared([16, 16], T.uint64)
+            T.print(shared_buf_uint64)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_float16 = T.alloc_shared([16, 16], T.float16)
+            T.print(shared_buf_float16)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_float32 = T.alloc_shared([16, 16], T.float32)
+            T.print(shared_buf_float32)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_float64 = T.alloc_shared([16, 16], T.float64)
+            T.print(shared_buf_float64)
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf_bfloat16 = T.alloc_shared([16, 16], T.bfloat16)
+            T.print(shared_buf_bfloat16)
 
     jit_kernel = tilelang.compile(program)
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
 
 
-@pytest.mark.parametrize(
-    "dtype", [T.int8, T.int16, T.int32, T.int64, T.uint8, T.uint16, T.uint32, T.uint64, T.float16, T.float32, T.float64, T.bfloat16]
-)
-def test_debug_print_buffer(dtype):
-    debug_print_buffer(dtype=dtype)
+def debug_print_buffer(M=16, N=16, dtype=T.float16):
+    @T.prim_func
+    def program(Q: T.Tensor((M, N), dtype)):
+        with T.Kernel(4, 4, 2, threads=128 * 2):
+            shared_buf = T.alloc_shared([M, N], dtype)
+            T.print(shared_buf)
+
+    jit_kernel = tilelang.compile(program)
+    profiler = jit_kernel.get_profiler()
+    profiler.run_once()
 
 
 @tilelang.testing.requires_cuda

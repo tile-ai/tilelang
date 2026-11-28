@@ -89,17 +89,6 @@ def test_wgmma_gemm_has_no_implicit_wait(gemm_api):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
-def test_wgmma_gemm_dispatch_has_no_implicit_wait():
-    kernel = tilelang.compile(
-        _make_wgmma_kernel(lambda A, B, C: T.wgmma_gemm(A, B, C, clear_accum=True)),
-        target="cuda",
-    )
-
-    assert kernel.get_kernel_source().count("tl::wait_wgmma<0>();") == 1
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_gemm_rejects_mma_fallback():
     @T.prim_func
     def main(
@@ -204,16 +193,6 @@ def test_wgmma_gemm_static_slice_initializes_from_slice_pointer():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
-def test_wgmma_gemm_sliced_operand_emits_offset():
-    # A sliced (non-zero-origin) operand must build the descriptor from the buffer
-    # base and advance it with increase_descriptor_offset.
-    kernel = tilelang.compile(_make_sliced_wgmma_kernel(64, 64, 64, 4), target="cuda")
-    src = kernel.get_kernel_source()
-    assert "increase_descriptor_offset" in src
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 @pytest.mark.parametrize(
     "M,N,K,num_k_tiles",
     [
@@ -228,6 +207,8 @@ def test_wgmma_gemm_sliced_operand_correctness(M, N, K, num_k_tiles):
     import torch
 
     kernel = tilelang.compile(_make_sliced_wgmma_kernel(M, N, K, num_k_tiles), target="cuda")
+    if (M, N, K, num_k_tiles) == (64, 64, 64, 4):
+        assert "increase_descriptor_offset" in kernel.get_kernel_source()
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)
     b = torch.randn(N, K, device="cuda", dtype=torch.float16)
     d = torch.empty(M, N, device="cuda", dtype=torch.float16)

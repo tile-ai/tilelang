@@ -1255,16 +1255,9 @@ def tile_atomic_max_program(K, M, N, block_M, block_N, dtype=T.float32):
 def run_tile_atomic_max(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = tile_atomic_max_program(K, M, N, block_M, block_N, dtype=dtype)
 
-    def ref_program(A, B):
-        for k in range(K):
-            for i in range(M):
-                for j in range(N):
-                    B[i, j] = max(B[i, j], A[k, i, j])
-
     A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
     B = torch.full((M, N), float("-inf"), dtype=getattr(torch, dtype)).cuda()
-    ref_B = B.clone()
-    ref_program(A, ref_B)
+    ref_B = torch.maximum(B, A.amax(dim=0))
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
@@ -1286,16 +1279,9 @@ def tile_atomic_min_program(K, M, N, block_M, block_N, dtype=T.float32):
 def run_tile_atomic_min(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = tile_atomic_min_program(K, M, N, block_M, block_N, dtype=dtype)
 
-    def ref_program(A, B):
-        for k in range(K):
-            for i in range(M):
-                for j in range(N):
-                    B[i, j] = min(B[i, j], A[k, i, j])
-
     A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
     B = torch.full((M, N), float("inf"), dtype=getattr(torch, dtype)).cuda()
-    ref_B = B.clone()
-    ref_program(A, ref_B)
+    ref_B = torch.minimum(B, A.amin(dim=0))
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
@@ -1314,14 +1300,8 @@ def run_tile_atomic_max_expr(M, N, block_M, block_N, dtype=T.float32):
     kernel = tile_atomic_max_expr_program(M, N, block_M, block_N, dtype=dtype)
     import torch
 
-    def ref_program(A):
-        for i in range(M):
-            for j in range(N):
-                A[i, j] = max(A[i, j], 0.5)
-
     A = torch.randn(M, N, dtype=torch.float32).cuda()
-    ref_A = A.clone()
-    ref_program(ref_A)
+    ref_A = A.clamp_min(0.5)
     kernel(A)
     torch.testing.assert_close(A, ref_A, atol=1e-3, rtol=1e-3)
 

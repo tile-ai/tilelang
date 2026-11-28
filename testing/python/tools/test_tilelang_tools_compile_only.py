@@ -1,8 +1,10 @@
+import contextlib
+import io
 import re
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,7 @@ from tilelang.tools.compile_only import (
     cuda_codegen_available,
     discover_prim_func,
     resolve_target,
+    cli_main,
 )
 
 _CAN_EMIT_LINE_DIRECTIVES = hasattr(PassConfigKey, "TL_EMIT_LINE_DIRECTIVES")
@@ -51,7 +54,7 @@ def _add(A, B):
     return C
 
 
-def _run_cli(*args):
+def _run_cli_subprocess(*args):
     return subprocess.run(
         [sys.executable, "-I", "-m", "tilelang.tools.compile_only", *args],
         capture_output=True,
@@ -59,6 +62,17 @@ def _run_cli(*args):
         check=False,
         timeout=180,
     )
+
+
+def _run_cli(*args):
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            returncode = cli_main(list(args))
+        except SystemExit as exc:
+            returncode = exc.code
+    return SimpleNamespace(returncode=returncode, stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
 
 def _line_directives(source: str) -> list[tuple[int, str]]:
@@ -144,7 +158,7 @@ def test_compile_only_cli_writes_kernel_source(tmp_path: Path):
     output = tmp_path / "out.s"
     example.write_text(_COMPILE_ONLY_EXAMPLE)
 
-    result = _run_cli("--output_file", str(output), str(example))
+    result = _run_cli_subprocess("--output_file", str(output), str(example))
 
     assert result.returncode == 0, result.stderr
     assert output.is_file()

@@ -11,6 +11,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
 
 TILE_M = 128
@@ -88,8 +89,13 @@ PAD_LIVENESS_CASES = [
 def test_tma_swizzled_smem_uses_swizzle_period_alignment(dtype, columns, required_alignment):
     # 32 int32 values create a 128B live allocation before smem. That is enough
     # for the generic TMA requirement, but not enough for any swizzle period.
-    kernel = _compile_kernel(MISALIGNING_PAD_ELEMS, dtype, columns)
-    source = kernel.get_kernel_source()
+    target = tilelang.backend.target.determine_target("auto", return_object=True)
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True}
+    with tvm.transform.PassContext(config=pass_configs), target:
+        source = tilelang.lower(
+            _make_swizzled_tma_copy_kernel.get_tir(MISALIGNING_PAD_ELEMS, dtype, columns),
+            target=target,
+        ).kernel_source
     pad_offset = _dynamic_smem_offset(source, "pad")
     smem_offset = _dynamic_smem_offset(source, "smem")
 

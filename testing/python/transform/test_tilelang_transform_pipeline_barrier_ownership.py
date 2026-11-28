@@ -9,6 +9,14 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm as tvm
+
+
+def _lower_source(func):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    with tvm.transform.PassContext(config=pass_configs), target:
+        return tilelang.lower(func, target=target).kernel_source
 
 
 def _check_hopper():
@@ -47,13 +55,7 @@ def test_nonws_plain_copy_gemm_num_stages_3_stays_sync():
                 T.gemm(A_s, B_s, C_l)
             T.copy(C_l, C[by * block_M, bx * block_N])
 
-    kernel = tilelang.compile(
-        gemm,
-        out_idx=-1,
-        execution_backend="tvm_ffi",
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    src = kernel.get_kernel_source()
+    src = _lower_source(gemm)
     assert "tl::tma_load" not in src, "Non-WS plain T.copy should stay synchronous"
     assert "pipeline_mbar_mem" not in src, "Non-WS plain T.copy should not allocate pipeline TMA barriers"
 
@@ -81,13 +83,7 @@ def test_nonws_plain_copy_gemm_num_stages_1_stays_sync():
                 T.gemm(A_s, B_s, C_l)
             T.copy(C_l, C[by * block_M, bx * block_N])
 
-    kernel = tilelang.compile(
-        gemm,
-        out_idx=-1,
-        execution_backend="tvm_ffi",
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    src = kernel.get_kernel_source()
+    src = _lower_source(gemm)
     assert "tl::tma_load" not in src, "Non-WS plain T.copy should stay synchronous"
     assert "pipeline_mbar_mem" not in src, "Non-WS plain T.copy should not allocate pipeline TMA barriers"
 
@@ -124,13 +120,7 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
             T.copy(out_local, out_shared)
             T.copy(out_shared, out_flat[by * block_M, bx * block_N])
 
-    kernel = tilelang.compile(
-        conv,
-        out_idx=-1,
-        execution_backend="tvm_ffi",
-        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
-    )
-    src = kernel.get_kernel_source()
+    src = _lower_source(conv)
     assert f"pipeline_mbar_mem[{num_stages}]" in src, f"Expected pipeline_mbar_mem[{num_stages}] for non-WS im2col TMA pipeline"
     # tma_load_im2col must appear (im2col was lowered through TMA path)
     assert "tma_load_im2col" in src, "Expected tma_load_im2col in generated code"

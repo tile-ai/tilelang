@@ -792,11 +792,12 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
     and run_batch is legitimately absent.
     """
 
-    src = tl.compile(
-        _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
-        out_idx=-1,
-        pass_configs={**_COMPILE_FLAGS, "tl.reducer_force_baseline": True},
-    ).get_kernel_source()
+    target = tl.backend.target.determine_target("auto", return_object=True)
+    with tvm.transform.PassContext(config={**_COMPILE_FLAGS, "tl.reducer_force_baseline": True}), target:
+        src = tl.lower(
+            _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
+            target=target,
+        ).kernel_source
 
     if batch == 1:
         assert "run_batch" not in src, f"batch=1 must not emit run_batch.\n{src}"

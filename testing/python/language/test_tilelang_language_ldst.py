@@ -1,4 +1,4 @@
-"""Tests for store_global_32, store_global_64, store_global_128, store_global_256 intrinsics codegen using eager jit style."""
+"""Tests for global/shared store intrinsics and predicated forms."""
 
 import tilelang
 import tilelang.language as T
@@ -6,342 +6,118 @@ import tilelang.testing
 import torch
 
 
-@tilelang.testing.requires_cuda
-def test_stg32_codegen():
-    """Test that stg32 generates tl::store_global_32 in CUDA source."""
+def _stg_combined_kernel():
+    N = 128
 
-    @tilelang.jit
-    def stg32_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+    @T.prim_func
+    def main(
+        X: T.Tensor((N,), T.float32),
+        Y0: T.Tensor((N,), T.float32),
+        Y1: T.Tensor((N,), T.float32),
+        Y2: T.Tensor((N,), T.float32),
+        Y3: T.Tensor((N,), T.float32),
+        Y4: T.Tensor((N,), T.float32),
+        Y5: T.Tensor((N,), T.float32),
+        Y6: T.Tensor((N,), T.float32),
+        Y7: T.Tensor((N,), T.float32),
+        Y8: T.Tensor((N,), T.float32),
+    ):
         with T.Kernel(N, threads=32) as pid:
-            val = T.reinterpret(X[pid], T.uint32)
-            T.stg32(Y[pid], val)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
-
-    stg32_kernel(X, Y)
-    src = stg32_kernel.get_kernel_source(N=128)
-    print("=== stg32 codegen ===")
-    print(src)
-    # Verify codegen
-    assert "store_global_32" in src, "Expected store_global_32 call in generated CUDA source"
-
-    # Verify correctness
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
-
-
-@tilelang.testing.requires_cuda
-def test_stg64_codegen():
-    """Test that stg64 generates tl::store_global_64 in CUDA source."""
-
-    @tilelang.jit
-    def stg64_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+            T.stg32(Y0[pid], T.reinterpret(X[pid], T.uint32))
         with T.Kernel(N // 2, threads=32) as pid:
-            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
-            T.stg64(Y[pid * 2 : pid * 2 + 2], val)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
-
-    stg64_kernel(X, Y)
-
-    # Verify codegen
-    src = stg64_kernel.get_kernel_source(N=128)
-    print("=== stg64 codegen ===")
-    print(src)
-    assert "store_global_64" in src, "Expected store_global_64 call in generated CUDA source"
-
-    # Verify correctness
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
-
-
-@tilelang.testing.requires_cuda
-def test_stg128_codegen():
-    """Test that stg128 generates tl::store_global_128 in CUDA source."""
-
-    @tilelang.jit
-    def stg128_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+            T.stg64(Y1[pid * 2 : pid * 2 + 2], T.ldg64(X[pid * 2 : pid * 2 + 2]))
         with T.Kernel(N // 4, threads=32) as pid:
-            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
-            T.stg128(Y[pid * 4 : pid * 4 + 4], val)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
-
-    stg128_kernel(X, Y)
-
-    # Verify codegen
-    src = stg128_kernel.get_kernel_source(N=128)
-    print("=== stg128 codegen ===")
-    print(src)
-    assert "store_global_128" in src, "Expected store_global_128 call in generated CUDA source"
-
-    # Verify correctness
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
-
-
-@tilelang.testing.requires_cuda
-def test_lds_sts32_codegen():
-    """Test that lds32/sts32 generate shared memory helper calls."""
-
-    @tilelang.jit
-    def lds_sts32_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+            T.stg128(Y2[pid * 4 : pid * 4 + 4], T.ldg128(X[pid * 4 : pid * 4 + 4]))
         with T.Kernel(N, threads=32) as pid:
-            S = T.alloc_shared((N,), T.float32)
-            T.sts32(S[pid], T.reinterpret(X[pid], T.uint32))
+            shared = T.alloc_shared((N,), T.float32)
+            T.sts32(shared[pid], T.reinterpret(X[pid], T.uint32))
             T.sync_threads()
-            val = T.lds32(S[pid])
-            T.stg32(Y[pid], val)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
-
-    lds_sts32_kernel(X, Y)
-    src = lds_sts32_kernel.get_kernel_source(N=128)
-    print("=== lds/sts32 codegen ===")
-    print(src)
-    assert "store_shared_32" in src
-    assert "load_shared_32" in src
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
-
-
-@tilelang.testing.requires_cuda
-def test_lds_sts64_codegen():
-    """Test that lds64/sts64 generate shared memory helper calls."""
-
-    @tilelang.jit
-    def lds_sts64_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+            T.stg32(Y3[pid], T.lds32(shared[pid]))
         with T.Kernel(N // 2, threads=32) as pid:
-            S = T.alloc_shared((N,), T.float32)
-            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
-            T.sts64(S[pid * 2 : pid * 2 + 2], val)
+            shared = T.alloc_shared((N,), T.float32)
+            T.sts64(shared[pid * 2 : pid * 2 + 2], T.ldg64(X[pid * 2 : pid * 2 + 2]))
             T.sync_threads()
-            val = T.lds64(S[pid * 2 : pid * 2 + 2])
-            T.stg64(Y[pid * 2 : pid * 2 + 2], val)
+            T.stg64(Y4[pid * 2 : pid * 2 + 2], T.lds64(shared[pid * 2 : pid * 2 + 2]))
+        with T.Kernel(N // 4, threads=32) as pid:
+            shared = T.alloc_shared((N,), T.float32)
+            T.sts128(shared[pid * 4 : pid * 4 + 4], T.ldg128(X[pid * 4 : pid * 4 + 4]))
+            T.sync_threads()
+            T.stg128(Y5[pid * 4 : pid * 4 + 4], T.lds128(shared[pid * 4 : pid * 4 + 4]))
+        with T.Kernel(N, threads=32) as pid:
+            T.stg32(Y6[pid], T.reinterpret(X[pid], T.uint32), pred=pid < N // 2)
+        with T.Kernel(N // 2, threads=32) as pid:
+            T.stg64(Y7[pid * 2 : pid * 2 + 2], T.ldg64(X[pid * 2 : pid * 2 + 2]), pred=pid < N // 4)
+        with T.Kernel(N // 4, threads=32) as pid:
+            T.stg128(Y8[pid * 4 : pid * 4 + 4], T.ldg128(X[pid * 4 : pid * 4 + 4]), pred=pid < N // 8)
 
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
-
-    lds_sts64_kernel(X, Y)
-    src = lds_sts64_kernel.get_kernel_source(N=128)
-    print("=== lds/sts64 codegen ===")
-    print(src)
-    assert "store_shared_64" in src
-    assert "load_shared_64" in src
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+    return main
 
 
 @tilelang.testing.requires_cuda
-def test_lds_sts128_codegen():
-    """Test that lds128/sts128 generate shared memory helper calls."""
+def test_stg_codegen():
+    kernel = tilelang.compile(_stg_combined_kernel(), target="cuda")
+    src = kernel.get_kernel_source()
+    for width in (32, 64, 128):
+        assert f"store_global_{width}" in src
+        assert f"store_global_{width}_conditional" in src
+        assert f"store_shared_{width}" in src
+        assert f"load_shared_{width}" in src
 
-    @tilelang.jit
-    def lds_sts128_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
+    x = torch.randn(128, dtype=torch.float32, device="cuda")
+    outputs = [torch.zeros(128, dtype=torch.float32, device="cuda") for _ in range(9)]
+    kernel(x, *outputs)
+    for result in outputs[:6]:
+        torch.testing.assert_close(result, x, atol=1e-5, rtol=1e-5)
+    for result in outputs[6:]:
+        torch.testing.assert_close(result[:64], x[:64], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(result[64:], torch.zeros_like(result[64:]), atol=0, rtol=0)
 
-        with T.Kernel(N // 4, threads=32) as pid:
-            S = T.alloc_shared((N,), T.float32)
-            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
-            T.sts128(S[pid * 4 : pid * 4 + 4], val)
-            T.sync_threads()
-            val = T.lds128(S[pid * 4 : pid * 4 + 4])
-            T.stg128(Y[pid * 4 : pid * 4 + 4], val)
 
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.empty(128, dtype=torch.float32, device="cuda")
+def _stg256_combined_kernel():
+    N = 256
 
-    lds_sts128_kernel(X, Y)
-    src = lds_sts128_kernel.get_kernel_source(N=128)
-    print("=== lds/sts128 codegen ===")
-    print(src)
-    assert "store_shared_128" in src
-    assert "load_shared_128" in src
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+    @T.prim_func
+    def main(
+        X: T.Tensor((N,), T.float32),
+        Y0: T.Tensor((N,), T.float32),
+        Y1: T.Tensor((N,), T.float32),
+    ):
+        with T.Kernel(N // 8, threads=32) as pid:
+            T.stg256(Y0[pid * 8 : pid * 8 + 8], T.ldg256(X[pid * 8 : pid * 8 + 8]))
+        with T.Kernel(N // 8, threads=32) as pid:
+            T.stg256(Y1[pid * 8 : pid * 8 + 8], T.ldg256(X[pid * 8 : pid * 8 + 8]), pred=pid < N // 16)
+
+    return main
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_codegen():
-    """Test that stg256 generates tl::store_global_256 in CUDA source."""
+    kernel = tilelang.compile(_stg256_combined_kernel(), target="cuda")
+    src = kernel.get_kernel_source()
+    assert "store_global_256" in src
+    assert "store_global_256_conditional" in src
 
-    @tilelang.jit
-    def stg256_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
-        with T.Kernel(N // 8, threads=32) as pid:
-            val = T.ldg256(X[pid * 8 : pid * 8 + 8])
-            T.stg256(Y[pid * 8 : pid * 8 + 8], val)
-
-    X = torch.randn(256, dtype=torch.float32, device="cuda")
-    Y = torch.empty(256, dtype=torch.float32, device="cuda")
-
-    stg256_kernel(X, Y)
-
-    # Verify codegen
-    src = stg256_kernel.get_kernel_source(N=256)
-    print("=== stg256 codegen ===")
-    print(src)
-    assert "store_global_256" in src, "Expected store_global_256 call in generated CUDA source"
-
-    # Verify correctness
-    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+    x = torch.randn(256, dtype=torch.float32, device="cuda")
+    outputs = [torch.zeros(256, dtype=torch.float32, device="cuda") for _ in range(2)]
+    kernel(x, *outputs)
+    torch.testing.assert_close(outputs[0], x, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(outputs[1][:128], x[:128], atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(outputs[1][128:], torch.zeros_like(outputs[1][128:]), atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_lt(10, 0)
 def test_implicit_256_bit_vector_store_fallback_on_pre_sm100():
-    """Test that an explicit 256-bit vector value falls back on pre-SM100."""
-
-    @tilelang.jit
-    def implicit_stg256_fallback_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[1], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
+    @T.prim_func
+    def main(X: T.Tensor((1,), T.float32), Y: T.Tensor((8,), T.float32)):
         with T.Kernel(1, threads=1):
-            # Keep this as a regular vector BufferStore rather than T.stg256:
-            # the codegen path must also lower frontend-created 256-bit values.
-            value = T.Broadcast(X[0], N)
-            Y[0:N] = value
+            Y[0:8] = T.Broadcast(X[0], 8)
 
-    X = torch.tensor([3.5], dtype=torch.float32, device="cuda")
-    Y = torch.zeros(8, dtype=torch.float32, device="cuda")
-
-    implicit_stg256_fallback_kernel(X, Y)
-
-    torch.testing.assert_close(Y, torch.full_like(Y, 3.5), atol=1e-5, rtol=1e-5)
-
-
-@tilelang.testing.requires_cuda
-def test_stg32_predicated_codegen():
-    """Test that stg32 with predicate generates tl::store_global_32_conditional(ptr, val, pred) in CUDA source."""
-
-    @tilelang.jit
-    def stg32_pred_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
-        with T.Kernel(N, threads=32) as pid:
-            val = T.reinterpret(X[pid], T.uint32)
-            # Only store for the first half of elements
-            T.stg32(Y[pid], val, pred=pid < N // 2)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.zeros(128, dtype=torch.float32, device="cuda")
-
-    stg32_pred_kernel(X, Y)
-    src = stg32_pred_kernel.get_kernel_source(N=128)
-    print("=== stg32 predicated codegen ===")
-    print(src)
-    # Verify codegen - should have store_global_32 with predicate
-    assert "store_global_32" in src, "Expected store_global_32 call in generated CUDA source"
-
-
-@tilelang.testing.requires_cuda
-def test_stg64_predicated_codegen():
-    """Test that stg64 with predicate generates tl::store_global_64_conditional(ptr, val, pred) in CUDA source."""
-
-    @tilelang.jit
-    def stg64_pred_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
-        with T.Kernel(N // 2, threads=32) as pid:
-            val = T.ldg64(X[pid * 2 : pid * 2 + 2])
-            # Only store for the first half of elements
-            T.stg64(Y[pid * 2 : pid * 2 + 2], val, pred=pid < N // 4)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.zeros(128, dtype=torch.float32, device="cuda")
-
-    stg64_pred_kernel(X, Y)
-
-    # Verify codegen
-    src = stg64_pred_kernel.get_kernel_source(N=128)
-    print("=== stg64 predicated codegen ===")
-    print(src)
-    assert "store_global_64" in src, "Expected store_global_64 call in generated CUDA source"
-
-
-@tilelang.testing.requires_cuda
-def test_stg128_predicated_codegen():
-    """Test that stg128 with predicate generates tl::store_global_128_conditional(ptr, val, pred) in CUDA source."""
-
-    @tilelang.jit
-    def stg128_pred_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
-        with T.Kernel(N // 4, threads=32) as pid:
-            val = T.ldg128(X[pid * 4 : pid * 4 + 4])
-            # Only store for the first half of elements
-            T.stg128(Y[pid * 4 : pid * 4 + 4], val, pred=pid < N // 8)
-
-    X = torch.randn(128, dtype=torch.float32, device="cuda")
-    Y = torch.zeros(128, dtype=torch.float32, device="cuda")
-
-    stg128_pred_kernel(X, Y)
-
-    # Verify codegen
-    src = stg128_pred_kernel.get_kernel_source(N=128)
-    print("=== stg128 predicated codegen ===")
-    print(src)
-    assert "store_global_128" in src, "Expected store_global_128 call in generated CUDA source"
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
-def test_stg256_predicated_codegen():
-    """Test that stg256 with predicate generates tl::store_global_256_conditional(ptr, val, pred) in CUDA source."""
-
-    @tilelang.jit
-    def stg256_pred_kernel(X, Y):
-        N = T.const("N")
-        X: T.Tensor[[N], T.float32]
-        Y: T.Tensor[[N], T.float32]
-
-        with T.Kernel(N // 8, threads=32) as pid:
-            val = T.ldg256(X[pid * 8 : pid * 8 + 8])
-            # Only store for the first half of elements
-            T.stg256(Y[pid * 8 : pid * 8 + 8], val, pred=pid < N // 16)
-
-    X = torch.randn(256, dtype=torch.float32, device="cuda")
-    Y = torch.zeros(256, dtype=torch.float32, device="cuda")
-
-    stg256_pred_kernel(X, Y)
-
-    # Verify codegen
-    src = stg256_pred_kernel.get_kernel_source(N=256)
-    print("=== stg256 predicated codegen ===")
-    print(src)
-    assert "store_global_256" in src, "Expected store_global_256 call in generated CUDA source"
+    x = torch.tensor([3.5], dtype=torch.float32, device="cuda")
+    y = torch.zeros(8, dtype=torch.float32, device="cuda")
+    tilelang.compile(main, target="cuda")(x, y)
+    torch.testing.assert_close(y, torch.full_like(y, 3.5), atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

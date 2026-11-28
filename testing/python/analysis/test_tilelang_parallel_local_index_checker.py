@@ -80,8 +80,10 @@ def test_parallel_local_index_rejected():
 
 
 def test_parallel_independent_local_index_allowed():
-    valid_constant_local_index()
-    valid_inner_vectorized_local_index()
+    target = tilelang.backend.target.determine_target("auto", return_object=True)
+    with target:
+        for kernel in (valid_constant_local_index, valid_inner_vectorized_local_index):
+            tilelang.lower(kernel.get_tir(), target=target)
 
 
 if __name__ == "__main__":

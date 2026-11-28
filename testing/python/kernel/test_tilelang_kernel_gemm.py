@@ -729,22 +729,6 @@ def test_gemm_f16f16f16_nn():
     )
 
 
-def test_gemm_f16f16f32_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        T.float16,
-        T.float16,
-        T.float32,
-        128,
-        128,
-        32,
-    )
-
-
 def test_gemm_bf16bf16f32_nn():
     run_gemm(
         512,

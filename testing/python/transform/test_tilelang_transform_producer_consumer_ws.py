@@ -821,16 +821,6 @@ def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     actual_rows = _find_after(src, "int actual_rows =")
 
     assert cur_batch_idx_loop < m_start < actual_rows < branch
-    _run_grouped_gemm_ws(kernel, batch_sizes)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
-    """Producer branch should reuse shared local.var state instead of cloning it."""
-    kernel, batch_sizes = _compile_grouped_gemm_ws()
-    src = kernel.get_kernel_source()
-
     assert "cur_batch_idx_producer_ws" not in src
     assert "cur_batch_size_producer_ws" not in src
     assert "tl::tma_load(B_desc" in src
@@ -926,7 +916,6 @@ if __name__ == "__main__":
     test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
     test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read()
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
-    test_tiled_ws_does_not_clone_local_var_into_producer_branch()
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()

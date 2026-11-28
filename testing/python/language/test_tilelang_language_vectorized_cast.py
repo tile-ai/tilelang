@@ -6,38 +6,25 @@ from tilelang import tvm
 from tvm import tirx
 
 
-@tilelang.jit
-def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
+def combined_vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
     assert M % 256 == 0
 
     @T.prim_func
     def main(
         A: T.Tensor[(M,), dtype_A],  # noqa: F821
         B: T.Tensor[(M,), dtype_B],  # noqa: F821
+        C: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             T.copy(A, B)
-
-    return main
-
-
-@tilelang.jit
-def parallel_vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
-    assert M % 256 == 0
-
-    @T.prim_func
-    def main(
-        A: T.Tensor[(M,), dtype_A],  # noqa: F821
-        B: T.Tensor[(M,), dtype_B],  # noqa: F821
-    ):
         with T.Kernel(1, threads=128):
             A_local = T.alloc_fragment((M,), dtype_A)
-            B_local = T.alloc_fragment((M,), dtype_B)
+            C_local = T.alloc_fragment((M,), dtype_B)
 
             T.copy(A, A_local)
             for i in T.Parallel(M):
-                B_local[i] = A_local[i]
-            T.copy(B_local, B)
+                C_local[i] = A_local[i]
+            T.copy(C_local, C)
 
     return main
 
@@ -52,12 +39,10 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
     """
 
     M = 128 * lanes
-    kernel = vectorized_cast_kernel(M, src_dtype, dst_dtype)
-    kernel_parallel = parallel_vectorized_cast_kernel(M, src_dtype, dst_dtype)
+    kernel = tilelang.compile(combined_vectorized_cast_kernel(M, src_dtype, dst_dtype))
 
     code = kernel.get_kernel_source()
-    code_parallel = kernel_parallel.get_kernel_source()
-    assert check_str in code and check_str in code_parallel, f"Cast {src_dtype} to {dst_dtype} with {lanes=} is not vectorized!"
+    assert code.count(check_str) >= 2, f"Cast {src_dtype} to {dst_dtype} with {lanes=} is not vectorized in both forms!"
 
     # Requires torch >= 2.8
     if src_dtype == T.float8_e8m0fnu or dst_dtype == T.float8_e8m0fnu:
@@ -66,15 +51,11 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
     if src_dtype == T.float4_e2m1fn or dst_dtype == T.float4_e2m1fn:
         return
 
-    A_float = torch.randn(M, dtype=torch.float32, device="cuda")
-    A = A_float.to(src_dtype.as_torch())
-
-    A = A_float.to(src_dtype.as_torch())
+    A = torch.randn(M, dtype=torch.float32, device="cuda").to(src_dtype.as_torch())
     B = torch.zeros(M, dtype=dst_dtype.as_torch(), device="cuda")
     C = torch.zeros(M, dtype=dst_dtype.as_torch(), device="cuda")
 
-    kernel(A, B)
-    kernel_parallel(A, C)
+    kernel(A, B, C)
 
     torch.testing.assert_close(A.to(dst_dtype.as_torch()), B)
     torch.testing.assert_close(A.to(dst_dtype.as_torch()), C)
