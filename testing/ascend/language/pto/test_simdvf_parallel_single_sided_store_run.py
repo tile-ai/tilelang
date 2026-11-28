@@ -128,6 +128,13 @@ def _build_branch_shapes():
                     y_ub[ROW_NESTED, i] = T.float32(7.0)
                     y_ub[ROW_OR, i] = T.float32(7.0)
                     y_ub[ROW_NESTED_THEN_ELSE, i] = T.float32(7.0)
+                    # The arm-local pair below reads its own destinations, so
+                    # both rows are seeded here instead of relying on whatever
+                    # UB happened to hold. The golden never depends on this
+                    # value: an ordering regression would now surface as the
+                    # seed instead of an incidental match.
+                    y_ub[ROW_ARM0, i] = T.float32(7.0)
+                    y_ub[ROW_ARM1, i] = T.float32(7.0)
                     if x_ub[i] > T.float32(0.0):
                         y_ub[ROW_SINGLE_SIDED, i] = T.float32(1.0)
                     # The nesting is the shape under test: folding a nested

@@ -427,15 +427,24 @@ bool IsProvablyTruePredicate(const PrimExpr &predicate,
 void CollectHandleBindTargets(const Stmt &stmt, std::set<const VarNode *> *out);
 
 /*! What a function knows about where its buffers live. */
+/*! Identity order for `Var` handles: the sets below keep the handle alive for
+ * as long as the analysis reads it, and compare by node identity. */
+struct VarIdentityLess {
+  bool operator()(const Var &lhs, const Var &rhs) const {
+    return lhs.get() < rhs.get();
+  }
+};
+using VarIdentitySet = std::set<Var, VarIdentityLess>;
+
 struct StorageOrigins {
   /*! Data Vars of real allocations (`AllocBuffer` / block `alloc_buffers`);
    * distinct allocations never overlap. */
-  std::set<const VarNode *> allocations;
+  VarIdentitySet allocations;
   /*! Data Vars of parameter buffers. */
-  std::set<const VarNode *> parameters;
+  VarIdentitySet parameters;
   /*! Parameter data Vars the caller declared as non-restrict; the source may
    * pass any of them the same storage. */
-  std::set<const VarNode *> non_restrict;
+  VarIdentitySet non_restrict;
   /*! True only when the function explicitly asserts `tir.noalias`. Absent is
    * not a promise: this pass runs before the kernel ABI is materialised, so two
    * parameters may still name one storage. */

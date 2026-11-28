@@ -27,6 +27,7 @@ Expected contract:
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 
 import pytest
@@ -139,6 +140,39 @@ def _expr_loads(expr):
 
     tvm.tirx.stmt_functor.post_order_visit(expr, visit)
     return set(found)
+
+
+def _expr_load_nodes(expr):
+    """`BufferLoad` nodes inside an expression, for identity comparisons."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.BufferLoad):
+            found.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(expr, visit)
+    return found
+
+
+def _is_negative_infinity(expr):
+    """True when `expr` is `-inf`, including the `inf * -1` form Legalize keeps."""
+
+    def constant(node):
+        if isinstance(node, tvm.tirx.FloatImm):
+            return float(node.value)
+        if isinstance(node, tvm.tirx.IntImm):
+            return float(node.value)
+        return None
+
+    value = constant(expr)
+    if value is not None:
+        return math.isinf(value) and value < 0
+    if isinstance(expr, tvm.tirx.Mul):
+        lhs, rhs = constant(expr.a), constant(expr.b)
+        if lhs is not None and rhs is not None:
+            product = lhs * rhs
+            return math.isinf(product) and product < 0
+    return False
 
 
 def _vmi_call_names(mod):
@@ -1117,10 +1151,17 @@ def test_divergent_branch_destinations_read_back_their_destination():
     assert {s.buffer.name for s in stores} == {"b", "c"}
     for store in stores:
         # Each store keeps its own destination's old value: the value choice
-        # reads that destination back, and the store stays unpredicated.
+        # reads that very destination back, and the store stays unpredicated.
         assert store.predicate is None, f"store into {store.buffer.name} must not be predicated"
-        assert store.buffer.name in _expr_loads(store.value), (
-            f"the value choice for {store.buffer.name} must read it back, got {sorted(_expr_loads(store.value))}"
+        read_backs = [
+            load
+            for load in _expr_load_nodes(store.value)
+            if load.buffer.same_as(store.buffer) and tvm.ir.structural_equal(load.indices, store.indices)
+        ]
+        assert read_backs, (
+            f"the value choice for {store.buffer.name} must read its own destination "
+            f"({store.buffer.name}{store.indices}) back, got loads from "
+            f"{sorted(_expr_loads(store.value))}"
         )
     assert len(_selects(legalized)) >= 2, "each destination needs its own value choice"
 
@@ -1161,6 +1202,10 @@ def test_infinity_constant_legalizes_to_floatimm():
     for stage in ("legalize", "vectorize"):
         text = _body_of(stages[stage]).__str__()
         assert "infinity" not in text, f"the frontend infinity op must not survive {stage}"
+    value_choices = [st for st in _stores(stages["legalize"]) if isinstance(st.value, tvm.tirx.Select)]
+    assert len(value_choices) == 1, f"the guarded store becomes one value choice, got {value_choices}"
+    false_arm = value_choices[0].value.false_value
+    assert _is_negative_infinity(false_arm), f"the false arm must keep the `-infinity` sentinel, got {false_arm}"
     names = _vmi_call_names(stages["vectorize"])
     assert names.get("tl.vmi.vsel") == 1, f"the Select must lower to vsel, got {names}"
     assert names.get("tl.vmi.vbrc", 0) >= 1, "the constant must reach a vbrc"

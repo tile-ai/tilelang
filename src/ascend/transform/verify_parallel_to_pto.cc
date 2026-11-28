@@ -1693,13 +1693,10 @@ private:
         LeaveScope(&saved_defs, &saved_env);
       }
 
-      void Admit(const Optional<PrimExpr> &predicate, const String &name) {
-        if (!predicate.defined()) {
-          return;
-        }
-        // Runs before any simplification: folding `True | ghost` to True would
-        // hide the undefined reference.
-        PostOrderVisit(predicate.value(), [&](const ObjectRef &node) {
+      // Reference check shared by the enclosing predicate and by the address
+      // expressions of loads nested in it.
+      void CheckPredicateVarsDefined(const PrimExpr &expr, const String &name) {
+        PostOrderVisit(expr, [&](const ObjectRef &node) {
           if (const auto *var = node.as<VarNode>()) {
             if (defs_.count(var) == 0) {
               std::ostringstream oss;
@@ -1712,6 +1709,15 @@ private:
             }
           }
         });
+      }
+
+      void Admit(const Optional<PrimExpr> &predicate, const String &name) {
+        if (!predicate.defined()) {
+          return;
+        }
+        // Runs before any simplification: folding `True | ghost` to True would
+        // hide the undefined reference.
+        CheckPredicateVarsDefined(predicate.value(), name);
         // The predicate is an expression position like any other, and it is
         // dropped after admission. An unadmitted node that the analyzer folds
         // away (`True | call_extern(...)`, `True | (p % 2 == 0)`) would
@@ -1725,6 +1731,39 @@ private:
                                           std::string(name) +
                                           "`: " + reason.value());
         }
+        // A `BufferLoad` nested in the predicate is admitted as a value, but
+        // its address is not: the whitelist treats a load as a leaf, so an
+        // unsupported node in its indices or in the load's own predicate would
+        // never be judged. Walk them here. The truth requirement stays on the
+        // enclosing access predicate only -- a nested load predicate filters
+        // lanes, it is not the predicate of this access.
+        PostOrderVisit(predicate.value(), [&](const ObjectRef &node) {
+          const auto *load = node.as<BufferLoadNode>();
+          if (load == nullptr) {
+            return;
+          }
+          for (const PrimExpr &index : load->indices) {
+            CheckPredicateVarsDefined(index, name);
+            if (auto reason = pto_analysis::FindUnsupportedExprNode(index)) {
+              parent_->Fail("expression", "access predicate on buffer `" +
+                                              std::string(name) +
+                                              "`: index of load from `" +
+                                              std::string(load->buffer->name) +
+                                              "`: " + reason.value());
+            }
+          }
+          if (load->predicate.defined()) {
+            CheckPredicateVarsDefined(load->predicate.value(), name);
+            if (auto reason = pto_analysis::FindUnsupportedExprNode(
+                    load->predicate.value())) {
+              parent_->Fail("expression", "access predicate on buffer `" +
+                                              std::string(name) +
+                                              "`: predicate of load from `" +
+                                              std::string(load->buffer->name) +
+                                              "`: " + reason.value());
+            }
+          }
+        });
         if (!pto_analysis::IsProvablyTruePredicate(predicate.value(),
                                                    &analyzer_, env_)) {
           std::ostringstream oss;

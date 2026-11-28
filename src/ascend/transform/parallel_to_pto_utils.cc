@@ -651,9 +651,13 @@ public:
   void VisitExpr_(const ModNode *) final { MarkUnsupported("Mod"); }
   void VisitExpr_(const FloorDivNode *) final { MarkUnsupported("FloorDiv"); }
   void VisitExpr_(const FloorModNode *) final { MarkUnsupported("FloorMod"); }
-  // Min/Max are admitted here — Verify runs before
-  // LegalizeParallelToPTO, which rewrites them into the Select form before
-  // VectorizeParallelToPTO consumes the unit.
+  // Min/Max are admitted here. LegalizeParallelToPTO then takes one of two
+  // paths: a supported integer Min/Max, or a supported floating-point one in
+  // relaxed mode, is kept as a node for the direct VMI instruction;
+  // everything else admitted by this whitelist is rewritten to the
+  // comparison-plus-Select form. VectorizeParallelToPTO therefore has to lower
+  // both shapes, so a future dtype change must not assume the comparison path
+  // is the only consumer.
   void VisitExpr_(const MinNode *op) final { ExprVisitor::VisitExpr_(op); }
   void VisitExpr_(const MaxNode *op) final { ExprVisitor::VisitExpr_(op); }
   // Select + relational ops (the shape Legalize produces and Vectorize
@@ -1923,16 +1927,16 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
   StorageOrigins origins;
   origins.no_alias = no_alias;
   for (const auto &kv : buffer_map) {
-    origins.parameters.insert(kv.second->data.get());
+    origins.parameters.insert(kv.second->data);
   }
   auto add_non_restrict = [&origins, &buffer_map](const Var &var) {
     if (!var.defined()) {
       return;
     }
-    origins.non_restrict.insert(var.get());
+    origins.non_restrict.insert(var);
     // The frontend may name the handle parameter or its data Var.
     if (auto buffer = buffer_map.Get(var)) {
-      origins.non_restrict.insert(buffer.value()->data.get());
+      origins.non_restrict.insert(buffer.value()->data);
     }
   };
   for (const Var &var : non_restrict_params) {
@@ -1944,14 +1948,14 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
     explicit Collector(StorageOrigins *out) : out_(out) {}
     void VisitStmt_(const tirx::SBlockNode *op) final {
       for (const Buffer &buffer : op->alloc_buffers) {
-        out_->allocations.insert(buffer->data.get());
+        out_->allocations.insert(buffer->data);
       }
       auto it = op->annotations.find(tl::attr::kNonRestrictParams);
       if (it != op->annotations.end()) {
         if (const auto *arr = (*it).second.as<ArrayObj>()) {
           for (const Var &var : Downcast<Array<Var>>((*it).second)) {
             if (var.defined()) {
-              out_->non_restrict.insert(var.get());
+              out_->non_restrict.insert(var);
             }
           }
         }
@@ -1960,7 +1964,7 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
     }
 
     void VisitStmt_(const tirx::AllocBufferNode *op) final {
-      out_->allocations.insert(op->buffer->data.get());
+      out_->allocations.insert(op->buffer->data);
       tirx::StmtExprVisitor::VisitStmt_(op);
     }
 
@@ -1971,9 +1975,9 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
   collector(body);
   // Block annotations also name the handle parameter; map them to the data Var
   // the conflict test compares, the same way the attribute path does.
-  for (const VarNode *var : std::set<const VarNode *>(origins.non_restrict)) {
-    if (auto buffer = buffer_map.Get(GetRef<Var>(var))) {
-      origins.non_restrict.insert(buffer.value()->data.get());
+  for (const Var &var : VarIdentitySet(origins.non_restrict)) {
+    if (auto buffer = buffer_map.Get(var)) {
+      origins.non_restrict.insert(buffer.value()->data);
     }
   }
   return origins;
@@ -1981,25 +1985,23 @@ StorageOrigins CollectStorageOrigins(const Stmt &body,
 
 bool MayConflictStorage(const Buffer &lhs, const Buffer &rhs,
                         const StorageOrigins &origins) {
-  const VarNode *lhs_var = lhs->data.get();
-  const VarNode *rhs_var = rhs->data.get();
-  if (lhs_var == rhs_var) {
+  if (lhs->data.same_as(rhs->data)) {
     return true;
   }
   // Two real allocations are distinct storage by construction.
-  if (origins.allocations.count(lhs_var) != 0 &&
-      origins.allocations.count(rhs_var) != 0) {
+  if (origins.allocations.count(lhs->data) != 0 &&
+      origins.allocations.count(rhs->data) != 0) {
     return false;
   }
   // Two parameters are distinct only under an explicit no-alias contract, and
   // even then a non-restrict parameter may alias any other storage.
-  if (origins.parameters.count(lhs_var) != 0 &&
-      origins.parameters.count(rhs_var) != 0) {
+  if (origins.parameters.count(lhs->data) != 0 &&
+      origins.parameters.count(rhs->data) != 0) {
     if (!origins.no_alias) {
       return true;
     }
-    return origins.non_restrict.count(lhs_var) != 0 ||
-           origins.non_restrict.count(rhs_var) != 0;
+    return origins.non_restrict.count(lhs->data) != 0 ||
+           origins.non_restrict.count(rhs->data) != 0;
   }
   // An allocation against a parameter, or a pointer with no origin we can name,
   // stays conservatively conflicting.

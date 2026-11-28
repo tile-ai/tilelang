@@ -116,6 +116,11 @@ def _k_newton_inside(E, lanes, dtype="float32"):
             x_ub = T.alloc_shared((P,), dtype)
             y_ub = T.alloc_shared((P,), dtype)
             T.copy(X, x_ub)
+            # Define every lane before the unit: the vectorized store and the
+            # copy-out touch the padded lanes too, so they must not read
+            # uninitialised UB. The in-unit seed store below stays the thing
+            # under test.
+            T.copy(X, y_ub)
             with T.SimdVF(lanes=lanes):
                 for i in T.Parallel(E):
                     y_ub[i] = T.float32(1.0)
@@ -222,7 +227,15 @@ def test_runtime_bound_shell_is_admitted_and_preserved(builder, carried):
 
     shells = _serial_shells_named(stages["vectorize"], "_t")
     assert shells, "the runtime-bound shell must survive vectorization"
-    assert not isinstance(shells[0].extent, tvm.tirx.IntImm), f"the trip count must stay a runtime expression, got {shells[0].extent}"
+    shell = shells[0]
+    assert shell.kind == tvm.tirx.ForKind.SERIAL, f"the shell must stay serial, got {shell.kind}"
+    assert isinstance(shell.extent, tvm.tirx.Var), f"the trip count must stay a runtime expression, got {shell.extent}"
+    func = next(iter(stages["vectorize"].functions.values()))
+    runtime_iter = next((p for p in func.params if p.name == "iters"), None)
+    assert runtime_iter is not None, f"the kernel must keep the `iters` parameter, got {[p.name for p in func.params]}"
+    assert shell.extent.same_as(runtime_iter), (
+        f"the shell must use the `iters` parameter as its extent, got {shell.extent} against {runtime_iter}"
+    )
     vec = str(stages["vectorize"])
     assert "_carry" not in vec, "no carry pattern here: nothing to promote"
 

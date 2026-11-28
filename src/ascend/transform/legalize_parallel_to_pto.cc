@@ -166,6 +166,13 @@ public:
     in_simd_vf_ = saved;
     SBlock block = GetRef<SBlock>(op);
     SBlockNode *node = block.CopyOnWrite();
+    // A realized block's initializer is a statement position of its own: it
+    // runs before the body and carries access predicates too, so it needs the
+    // same clearing. Verify admits those predicates, so a survivor here means
+    // the two passes disagree.
+    if (op->init.defined()) {
+      node->init = NormalizePredicates(op->init.value());
+    }
     node->body = body;
     return block;
   }
@@ -255,6 +262,16 @@ public:
           iter_values.push_back(rewritten);
         }
         SBlock block = GetRef<SBlock>(op->block.get());
+        // The block owns its own scope: its initializer runs before the body
+        // and is an expression/statement position like any other, so it is
+        // visited first and gets the same predicate clearing.
+        if (block->init.defined()) {
+          const Stmt init = VisitStmt(block->init.value());
+          if (!init.same_as(block->init.value())) {
+            block.CopyOnWrite()->init = init;
+            changed = true;
+          }
+        }
         const Stmt body = VisitStmt(block->body);
         if (!body.same_as(block->body)) {
           block.CopyOnWrite()->body = body;
@@ -447,10 +464,14 @@ public:
     const std::set<const VarNode *> constrained = ConditionSymbols(condition);
     for (size_t axis = 0; axis < indices.size(); ++axis) {
       // Scalar `Bind` values in scope are known expressions, not opaque
-      // symbols: expand them so `r = row + 1` is judged as `row + 1`.
-      const PrimExpr index = predicate_env_.empty()
-                                 ? indices[axis]
-                                 : Substitute(indices[axis], predicate_env_);
+      // symbols: expand them so `r = row + 1` is judged as `row + 1`. The
+      // region-entry snapshot (`predicate_env_`) covers the enclosing scope;
+      // the fold-site Bind environment covers aliases defined inside the unit,
+      // which is what makes `j = row; if row < 2: y[j, i] = 1` decidable.
+      PrimExpr index = predicate_env_.empty()
+                           ? indices[axis]
+                           : Substitute(indices[axis], predicate_env_);
+      index = ExpandIndexAliases(index);
       const arith::ConstIntBound bound =
           predicate_analyzer_.const_int_bound(index);
       if (bound->min_value <= -kRuntimeBound ||
@@ -557,6 +578,35 @@ public:
   // Every symbol the folded condition mentions. Collected conservatively: a
   // condition that constrains `row` through any expression makes the guard a
   // candidate reason for the access to fit.
+  // Expands pure index aliases through the lexical Bind environment the fold
+  // has seen, transitively. A Bind whose value reads memory is a snapshot: it
+  // stays opaque, matching the admission rule Verify applies to predicates.
+  PrimExpr ExpandIndexAliases(const PrimExpr &expr) {
+    if (guard_bind_env_.empty()) {
+      return expr;
+    }
+    Map<Var, PrimExpr> aliases;
+    for (const auto &entry : guard_bind_env_) {
+      if (pto::IsSafelyReevaluableValue(entry.second)) {
+        aliases.Set(entry.first, entry.second);
+      }
+    }
+    if (aliases.empty()) {
+      return expr;
+    }
+    PrimExpr result = expr;
+    // Aliases can chain (`a = b`, `b = row`); a small fixed number of passes
+    // covers the chains and also stops a self-referential definition.
+    for (int pass = 0; pass < 8; ++pass) {
+      const PrimExpr next = Substitute(result, aliases);
+      if (next.same_as(result)) {
+        break;
+      }
+      result = next;
+    }
+    return result;
+  }
+
   std::set<const VarNode *> ConditionSymbols(const PrimExpr &condition) {
     std::set<const VarNode *> symbols;
     std::set<const VarNode *> expanded;
