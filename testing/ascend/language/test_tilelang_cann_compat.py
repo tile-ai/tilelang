@@ -120,7 +120,9 @@ def _division_inputs(dtype):
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("dtype", INTEGER_DTYPES)
 @pytest.mark.parametrize("mode", MODES)
-def test_integer_division_truncates_toward_zero_and_preserves_guards(dtype, mode):
+def test_integer_division_truncates_toward_zero_and_preserves_guards(dtype, mode, request):
+    if dtype.startswith("uint") and mode == "MODE_ZEROING":
+        request.getfixturevalue("cann_91")
     a, b, active = _division_inputs(dtype)
     _exercise_arithmetic(arithmetic_kernel("div", dtype, mode), a, b, active, mode, ("integer div", dtype))
 
@@ -435,7 +437,7 @@ def native_div_kernel():
 
 
 @tilelang.testing.requires_ascend
-def test_native_div_extern_returns_one_masked_register():
+def test_native_div_extern_returns_one_masked_register(cann_91):
     kernel = tilelang.compile(native_div_kernel(), target="ascend")
     lhs = torch.arange(65, 129).to(torch.uint32)
     rhs = torch.full((64,), 3, dtype=torch.uint32)

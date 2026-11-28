@@ -18,7 +18,7 @@ def pow_kernel(n: int):
 
 
 @tilelang.testing.requires_ascend
-def test_simt_pow_fp32_range_boundaries():
+def test_simt_pow_fp32_range_boundaries(cann_91):
     # Raw FP32 pairs reproduce the inputs on both sides of under/overflow.
     x = torch.tensor([0.7, 0.7, 0.7, 0.7, -2.0, -2.0, -2.0, -2.0, -2.0], dtype=torch.float32)
     y = torch.tensor([-248.625, -249.0, 291.0, 292.0, 2.0, 3.0, -149.0, -151.0, 129.0], dtype=torch.float32)

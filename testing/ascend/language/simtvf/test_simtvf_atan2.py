@@ -6,7 +6,7 @@ import tilelang.testing
 
 
 @tilelang.testing.requires_ascend
-def test_atan2_rounds_tiny_angles_with_their_sign():
+def test_atan2_rounds_tiny_angles_with_their_sign(cann_91):
     # Use both neighbors of 2. At x=2, |y/x| is exactly halfway between
     # two FP32 values, and atan(|y/x|) lies just below that midpoint.
     x_bits = [0x3FFFFFFF, 0x40000000, 0x40000001] * 2

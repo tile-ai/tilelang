@@ -214,6 +214,7 @@ __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
 #else
   ::asc_div(dst, lhs, rhs, mask);
 #endif
+#if TL_CANN_9_1
   // Unsigned division can leave quotient estimates in inactive lanes.
   // A masked add of zero preserves the quotient and clears those lanes.
   if constexpr (std::is_same_v<V, vector_u16>) {
@@ -221,6 +222,7 @@ __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
   } else if constexpr (std::is_same_v<V, vector_u32>) {
     ::vadds(dst, dst, uint32_t(0), mask, MODE_ZEROING);
   }
+#endif
 }
 
 #if TL_CANN_9_1
