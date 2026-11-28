@@ -833,6 +833,40 @@ private:
       parent_->Fail("dtype", oss.str());
     }
 
+    // The same rule CheckOneOp applies to lane-uniform arithmetic: a runtime
+    // float computation that stays scalar has no scalar float ALU inside
+    // SIMD_VF. Min/Max must not slip past it just because Legalize may keep
+    // them as nodes, so the check is shared instead of duplicated.
+    void CheckUniformFloatRuntime(const char *op_name, DataType dtype,
+                                  const PrimExpr &lhs, const PrimExpr &rhs) {
+      pto_analysis::LaneUseContext ctx = MakeLaneUseContext();
+      std::string why;
+      pto_analysis::LaneUse a = pto_analysis::AnalyzeLaneUse(lhs, &ctx, &why);
+      pto_analysis::LaneUse b = pto_analysis::AnalyzeLaneUse(rhs, &ctx, &why);
+      if (a == pto_analysis::LaneUse::kUnknown ||
+          b == pto_analysis::LaneUse::kUnknown) {
+        // The operand's access analysis failed; the dedicated BufferLoad
+        // visitor reports that with the correct category later in this walk.
+        return;
+      }
+      if (a == pto_analysis::LaneUse::kVarying ||
+          b == pto_analysis::LaneUse::kVarying) {
+        return; // vector path: the VMI matrix already judged it
+      }
+      if (!pto_analysis::IsFloatFamily(dtype) ||
+          (!pto_analysis::ContainsRuntimeValue(lhs) &&
+           !pto_analysis::ContainsRuntimeValue(rhs))) {
+        return; // compile-time constants fold; integers have no such premise
+      }
+      std::ostringstream oss;
+      oss << op_name << " on " << dtype
+          << " is a runtime lane-uniform float computation; it stays "
+             "scalar inside SIMD_VF (no scalar float ALU by design). "
+             "Compute it outside the SimdVF region, or wait for the "
+             "gather/scatter milestone for vector write-back";
+      parent_->Fail("dtype", oss.str());
+    }
+
     void CheckBinaryOpTypes(const PrimExpr &expr) {
       std::function<void(const PrimExpr &)> check =
           [&](const PrimExpr &e) {
@@ -893,6 +927,7 @@ private:
                               "operands has no lane-mask lowering";
               }
               CheckMinMaxDType(minn->dtype, "Min");
+              CheckUniformFloatRuntime("Min", minn->dtype, minn->a, minn->b);
               check(minn->a);
               check(minn->b);
               return;
@@ -905,6 +940,7 @@ private:
                               "operands has no lane-mask lowering";
               }
               CheckMinMaxDType(maxn->dtype, "Max");
+              CheckUniformFloatRuntime("Max", maxn->dtype, maxn->a, maxn->b);
               check(maxn->a);
               check(maxn->b);
               return;

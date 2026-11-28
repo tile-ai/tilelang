@@ -701,6 +701,73 @@ def _k_guard_on_a_symbol_outside_the_index(E=64, lanes=64, rows=2):
     return main
 
 
+def _k_guard_bound_runtime_row_symbolic(E=64, lanes=64, rows=2):
+    """The guard-bounded row index on a symbolic-leading-extent buffer."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((E,), "float32"),
+        Y: T.Tensor((_DYNAMIC_K, E), "float32"),
+        row: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((_DYNAMIC_K, E), "float32")
+            T.copy(A, a)
+            T.copy(Y, y)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    if (row >= 0) & (row < rows):
+                        y[row, i] = T.float32(1.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_guard_bound_runtime_row_is_rejected_on_a_symbolic_axis():
+    """A symbolic extent skips only the static overflow scan.
+
+    The guard verdict does not need the extent, so `y[row, i]` under
+    `0 <= row < 2` must be rejected on a symbolic leading axis exactly as on a
+    static one.
+    """
+    _, error = _lower_capture(_k_guard_bound_runtime_row_symbolic(), expect_error=True)
+    assert error is not None, "a guard-bounded runtime row must not be folded on a symbolic axis"
+    message = str(error)
+    assert "runtime symbol `row`" in message, f"expected the guard diagnostic, got: {message}"
+    assert "axis 0" in message, f"the row axis is the offending one, got: {message}"
+
+
+def _k_lane_uniform_float_min(E=64, lanes=64):
+    """A float Min over two runtime scalars: a scalar computation in the unit."""
+
+    @T.prim_func
+    def main(
+        Y: T.Tensor((E,), "float32"),
+        lo: T.float32,
+        hi: T.float32,
+    ):
+        with T.Kernel(1):
+            y = T.alloc_shared((E,), "float32")
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    y[i] = T.min(lo, hi)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_lane_uniform_float_min_over_runtime_scalars_is_rejected():
+    """Min/Max follow the same scalar-float rule as Add/Sub/Mul/Div."""
+    _, error = _lower_capture(_k_lane_uniform_float_min(), expect_error=True)
+    assert error is not None, "a runtime lane-uniform float Min must be rejected"
+    message = str(error)
+    assert "runtime lane-uniform float computation" in message, f"expected the scalar-float rule, got: {message}"
+    assert "Min" in message, f"the diagnostic must name the operation, got: {message}"
+
+
 @pytest.mark.pto
 def test_guard_on_a_symbol_outside_the_index_still_folds():
     """The guard mentions `row`, but the store index is the constant row 0.

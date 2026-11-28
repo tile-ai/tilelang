@@ -439,12 +439,6 @@ public:
     const int64_t kRuntimeBound = int64_t{1} << 31;
     const std::set<const VarNode *> constrained = ConditionSymbols(condition);
     for (size_t axis = 0; axis < indices.size(); ++axis) {
-      const auto *dim = buffer->shape[axis].as<IntImmNode>();
-      if (dim == nullptr) {
-        // A dynamic extent on this axis says nothing about the others: keep
-        // scanning so a static axis can still prove an overflow.
-        continue;
-      }
       // Scalar `Bind` values in scope are known expressions, not opaque
       // symbols: expand them so `r = row + 1` is judged as `row + 1`.
       const PrimExpr index = predicate_env_.empty()
@@ -460,24 +454,51 @@ public:
         // address that fits only under the guard must not become
         // unconditional. `if 0 <= row < 2: y[row, i] = 1` on a (2, 64) buffer
         // is the case: `row = 2` never accessed the buffer in the source.
-        for (const VarNode *symbol : UnresolvedSymbols(index)) {
-          if (constrained.count(symbol) != 0) {
-            out_of_bounds_detail_ =
-                "buffer `" + std::string(buffer->name) + "` axis " +
-                std::to_string(axis) + " uses runtime symbol `" +
-                symbol->name_hint +
-                "` that the folded condition constrains; the guard is the only "
-                "reason this access fits";
-            return true;
-          }
+        // This check needs no extent, so a symbolic axis runs it too -- only
+        // the static overflow scan below needs one.
+        if (GuardCarriesTheAccess(buffer, axis, index, constrained)) {
+          return true;
         }
         continue; // runtime-driven axis, not guarded: the program's contract
+      }
+      const auto *dim = buffer->shape[axis].as<IntImmNode>();
+      if (dim == nullptr) {
+        // A dynamic extent cannot bound the upper end, but a provable range
+        // still carries a meaningful lower end.
+        if (bound->min_value < 0) {
+          out_of_bounds_detail_ = "buffer `" + std::string(buffer->name) +
+                                  "` axis " + std::to_string(axis) +
+                                  " is indexed below zero, range [" +
+                                  std::to_string(bound->min_value) + ", " +
+                                  std::to_string(bound->max_value) + "]";
+          return true;
+        }
+        continue;
       }
       if (bound->min_value < 0 || bound->max_value >= dim->value) {
         out_of_bounds_detail_ =
             DescribeOutOfBounds(buffer, axis, dim->value, bound);
         return true;
       }
+    }
+    return false;
+  }
+
+  // True when the folded condition constrains a runtime symbol the access index
+  // depends on, i.e. the guard is what keeps the address in range.
+  bool GuardCarriesTheAccess(const Buffer &buffer, size_t axis,
+                             const PrimExpr &index,
+                             const std::set<const VarNode *> &constrained) {
+    for (const VarNode *symbol : UnresolvedSymbols(index)) {
+      if (constrained.count(symbol) == 0) {
+        continue;
+      }
+      out_of_bounds_detail_ = "buffer `" + std::string(buffer->name) +
+                              "` axis " + std::to_string(axis) +
+                              " uses runtime symbol `" + symbol->name_hint +
+                              "` that the folded condition constrains; the "
+                              "guard is the only reason this access fits";
+      return true;
     }
     return false;
   }
