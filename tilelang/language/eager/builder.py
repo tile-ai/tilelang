@@ -21,7 +21,7 @@ from tvm.tirx import Buffer
 from tvm.script.ir_builder import tirx, IRBuilder
 
 from tvm.tirx.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, ForwardRef, Literal, get_origin, ParamSpec
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Literal, get_origin, ParamSpec
 from collections.abc import Callable
 from typing_extensions import Self
 from collections.abc import Hashable
@@ -1112,7 +1112,6 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
     return impl(func) if func is not None else impl
 
 
-from typing import _eval_type
 import re
 
 
@@ -1154,7 +1153,7 @@ def get_type_hints(func):
         if value is None:
             value = type(None)
         if isinstance(value, str):
-            # if the annotation is string, is can be: (i) a T.float32 like annotations, (ii) a ForwardRef object
+            # if the annotation is string, is can be: (i) a T.float32 like annotations, (ii) any other expression
             # typing doesn't handle (i), it will try to interpret T.float32
             #    typing see: T.float32 is str('float32'), and there is no object named `flaot32` and give a NameError
             # here we manually interpret it to return T.float32 object
@@ -1168,8 +1167,23 @@ def get_type_hints(func):
                     continue
                 except Exception:
                     pass
-            value = ForwardRef(value, module=func.__module__)
-            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            # TileLang annotations such as T.Tensor((128,), "float32") evaluate to
+            # runtime objects (tirx.Buffer), not Python types, so they must not be
+            # routed through typing._eval_type: its _type_check rejects non-type
+            # results on CPython != 3.11 and breaks decoration under
+            # `from __future__ import annotations` (issue #4134). Evaluate the
+            # annotation expression directly instead.
+            resolved = eval(value, globalns, localns)
+            # An explicitly quoted annotation (e.g. x: "T.Ref") under future
+            # annotations is stored as '"T.Ref"' and evaluates to the inner
+            # string 'T.Ref'. Keep resolving string results to the underlying
+            # object so Ref hints reach macro_arg's reference handling. The
+            # `seen` guard stops self-referential names from looping forever.
+            seen = {value}
+            while isinstance(resolved, str) and resolved not in seen:
+                seen.add(resolved)
+                resolved = eval(resolved, globalns, localns)
+            hints[name] = resolved
         else:
             hints[name] = value
     return hints
