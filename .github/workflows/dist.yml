@@ -441,7 +441,10 @@ jobs:
 
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        if: >-
+          github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.title, '[Release]') ||
+          (github.event.pull_request.number == 4399 && runner.os == 'Linux' && runner.arch == 'X64')
         uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
