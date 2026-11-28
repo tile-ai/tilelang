@@ -77,25 +77,6 @@ _NPU = _npu_available()
 requires_npu = pytest.mark.skipif(not _NPU, reason="NPU runtime is unavailable")
 
 
-@contextlib.contextmanager
-def _without_data_race_check():
-    """Scope the race-check override to kernel compilation, then restore it.
-
-    Setting it at import time would leak into the whole pytest process (and
-    overwrite a caller's explicit value) even when every test is skipped.
-    """
-    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
-    saved = os.environ.get(key)
-    os.environ[key] = "1"
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = saved
-
-
 def _dev():
     return torch.device("npu")
 
@@ -229,8 +210,12 @@ def _gold_carried(x, thr):
 
 
 def _compile(prim):
-    with _without_data_race_check():
-        return tilelang.compile(prim, target="pto", out_idx=-1)
+    return tilelang.compile(
+        prim,
+        target="pto",
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True},
+    )
 
 
 @lru_cache(maxsize=None)

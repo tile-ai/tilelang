@@ -1313,11 +1313,14 @@ bool IsSupportedVectorBinaryOp(const std::string &vmi_op, DataType dtype) {
     return dtype.is_float() && (bits == 16 || bits == 32);
   }
   if (vmi_op == "vmin" || vmi_op == "vmax") {
-    // The direct Min/Max instruction covers 8/16/32-bit integers and
-    // f16/bf16/f32; FP8 and 64-bit formats have no lowering, so those keep the
-    // comparison plus Select form.
+    // The direct Min/Max instruction covers 8/16/32-bit integers, f16/bf16/f32
+    // and FP8 (`float8_e4m3fn` / `float8_e5m2`). FP8 is admitted on purpose:
+    // the PTOAS VMI verifier narrows the element set to
+    // i8/i16/i32/f16/bf16/f32, but that narrowing is a VMI-level policy -- the
+    // micro/VPTO layer types these ops with an unrestricted vector type -- so
+    // the front end does not duplicate it. 64-bit formats have no lowering.
     return (is_int_like && (bits == 8 || bits == 16 || bits == 32)) ||
-           is_fp_like;
+           is_fp_like || dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2();
   }
   return false;
 }

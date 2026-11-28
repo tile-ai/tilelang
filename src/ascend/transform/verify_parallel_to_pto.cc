@@ -828,8 +828,8 @@ private:
       oss << name << " on " << dtype
           << " has no PTO Parallel lowering: neither the direct Min/Max "
              "instruction nor the comparison plus select form accepts it. The "
-             "supported element types are 8/16/32-bit integers and "
-             "f16/bf16/f32.";
+             "supported element types are 8/16/32-bit integers, f16/bf16/f32 "
+             "and FP8.";
       parent_->Fail("dtype", oss.str());
     }
 
@@ -1621,7 +1621,7 @@ private:
         LeaveScope(&saved_defs, &saved_env);
       }
       void VisitStmt_(const SBlockNode *op) final {
-        VisitScopedBlock(op->iter_vars, op->alloc_buffers, op->body);
+        VisitScopedBlock(op->iter_vars, op->alloc_buffers, op->init, op->body);
       }
       void VisitStmt_(const SBlockRealizeNode *op) final {
         // The realize header is evaluated in the enclosing scope, before the
@@ -1634,7 +1634,7 @@ private:
           VisitExpr(value);
         }
         VisitScopedBlock(op->block->iter_vars, op->block->alloc_buffers,
-                         op->block->body);
+                         op->block->init, op->block->body);
       }
       void VisitStmt_(const BindNode *op) final {
         StmtExprVisitor::VisitStmt_(op);
@@ -1673,7 +1673,7 @@ private:
     private:
       void VisitScopedBlock(const Array<IterVar> &iter_vars,
                             const Array<Buffer> &alloc_buffers,
-                            const Stmt &body) {
+                            const Optional<Stmt> &init, const Stmt &body) {
         std::set<const VarNode *> saved_defs;
         Map<Var, PrimExpr> saved_env;
         EnterScope(&saved_defs, &saved_env);
@@ -1682,6 +1682,12 @@ private:
         }
         for (const Buffer &buffer : alloc_buffers) {
           defs_.insert(buffer->data.get());
+        }
+        // The block's init statement runs in the same scope and carries access
+        // predicates just like the body: admitting only the body would let a
+        // predicated shared-buffer access through unchecked.
+        if (init.defined()) {
+          StmtExprVisitor::VisitStmt(init.value());
         }
         StmtExprVisitor::VisitStmt(body);
         LeaveScope(&saved_defs, &saved_env);

@@ -50,25 +50,6 @@ _NPU = _npu_available()
 requires_npu = pytest.mark.skipif(not _NPU, reason="NPU runtime is unavailable")
 
 
-@contextlib.contextmanager
-def _without_data_race_check():
-    """Scope the race-check override to kernel compilation, then restore it.
-
-    Setting it at import time would leak into the whole pytest process (and
-    overwrite a caller's explicit value) even when every test is skipped.
-    """
-    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
-    saved = os.environ.get(key)
-    os.environ[key] = "1"
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = saved
-
-
 def _dev():
     return torch.device("npu")
 
@@ -102,8 +83,11 @@ def _kernel():
     if _KERNEL[0] is None:
         # No `out_idx`: the kernel mixes a scalar parameter with buffers, and the
         # output index resolves through the buffer map. Y is written in place.
-        with _without_data_race_check():
-            _KERNEL[0] = tilelang.compile(_build(), target="pto")
+        _KERNEL[0] = tilelang.compile(
+            _build(),
+            target="pto",
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True},
+        )
     return _KERNEL[0]
 
 

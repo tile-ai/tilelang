@@ -739,6 +739,97 @@ def test_guard_bound_runtime_row_is_rejected_on_a_symbolic_axis():
     assert "axis 0" in message, f"the row axis is the offending one, got: {message}"
 
 
+def _k_guard_through_a_bool_bind(E=64, lanes=64, rows=2):
+    """The guard is a Bool Bind, so the condition itself names no symbols."""
+
+    @T.prim_func
+    def main(R_handle: T.handle, Y_handle: T.handle, row: T.int32):
+        R = T.match_buffer(R_handle, (E,), "float32")
+        Y = T.match_buffer(Y_handle, (rows, E), "float32")
+        with T.Kernel(1):
+            r = T.alloc_shared((E,), "float32")
+            y = T.alloc_shared((rows, E), "float32")
+            T.copy(R, r)
+            T.copy(Y, y)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    ok = (row >= 0) & (row < rows)
+                    if ok:
+                        y[row, i] = T.float32(1.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_guard_through_a_bool_bind_is_still_rejected():
+    """`if ok` must inherit `ok`'s dependencies: the guard still bounds `row`."""
+    _, error = _lower_capture(_k_guard_through_a_bool_bind(), expect_error=True)
+    assert error is not None, "a guard behind a Bool Bind must not hide the runtime index"
+    message = str(error)
+    assert "runtime symbol `row`" in message, f"expected the guard diagnostic, got: {message}"
+
+
+def _k_guard_bounds_a_symbolic_extent(lanes=128):
+    """`y: (n,)` written under `if i < n`: the guard is what keeps it inside."""
+
+    @T.prim_func
+    def main(n: T.int32, Y_handle: T.handle):
+        Y = T.match_buffer(Y_handle, (n,), "float32")
+        with T.Kernel(1):
+            y = T.alloc_shared((n,), "float32")
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(lanes):
+                    if i < n:
+                        y[i] = T.float32(1.0)
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_fold_past_a_symbolic_extent_is_rejected():
+    """The guard bounds a symbolic extent, so the fold would store every lane.
+
+    With `n == 64` and a 128-lane unit the source writes only the first half;
+    the folded store writes (and reads back) the whole unit, past the buffer.
+    """
+    _, error = _lower_capture(_k_guard_bounds_a_symbolic_extent(), expect_error=True)
+    assert error is not None, "folding past a guard-bounded symbolic extent must be rejected"
+    message = str(error)
+    assert "has symbolic extent `n`" in message, f"expected the symbolic-extent diagnostic, got: {message}"
+
+
+def _k_symbolic_extent_without_a_guard_on_it(lanes=128):
+    """A symbolic extent the folded condition never mentions."""
+
+    @T.prim_func
+    def main(X_handle: T.handle, n: T.int32, Y_handle: T.handle):
+        X = T.match_buffer(X_handle, (lanes,), "float32")
+        Y = T.match_buffer(Y_handle, (n,), "float32")
+        with T.Kernel(1):
+            x = T.alloc_shared((lanes,), "float32")
+            y = T.alloc_shared((n,), "float32")
+            T.copy(X, x)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(lanes):
+                    if x[i] > T.float32(0.0):
+                        y[i] = x[i]
+            T.copy(y, Y)
+
+    return main
+
+
+@pytest.mark.pto
+def test_symbolic_extent_outside_the_condition_still_folds():
+    """The extent is the caller's contract here: the guard neither bounds it nor
+    indexes it, so the fold must stay."""
+    stages, error = _lower_capture(_k_symbolic_extent_without_a_guard_on_it())
+    assert error is None, f"a symbolic extent unrelated to the guard must fold, got: {error}"
+    assert not _if_then_elses(stages["legalize"]), "the guard must be folded away"
+    assert _selects(stages["legalize"]), "the guard must become a value choice"
+
+
 def _k_lane_uniform_float_min(E=64, lanes=64):
     """A float Min over two runtime scalars: a scalar computation in the unit."""
 
@@ -828,19 +919,31 @@ def test_floor_division_in_a_guarded_arm_is_rejected():
 
 
 @pytest.mark.pto
-@pytest.mark.parametrize("relaxed", [True, False])
-def test_fp8_minmax_is_rejected_in_both_configurations(relaxed):
-    """FP8 has neither a direct Min/Max instruction nor a vcmp/vsel form, so
-    neither setting can lower it: Verify rejects it with the same dtype
-    diagnostic, and the config cannot be used as an escape hatch."""
-    _, error = _lower_capture(
+def test_fp8_minmax_uses_the_direct_instruction():
+    """FP8 follows the same rule as the other float dtypes.
+
+    The element-set narrowing for FP8 lives in the PTOAS VMI verifier, not in
+    the micro/VPTO layer, so the front end admits it and the relaxed form lowers
+    to the direct instruction.
+    """
+    stages, error = _lower_capture(_k_minmax_fp8())
+    assert error is None, f"FP8 Min/Max must lower through the front end, got: {error}"
+    assert _max_min_nodes(stages["legalize"]), "the relaxed form must keep the Min/Max node"
+    names = _vmi_call_names(stages["vectorize"])
+    assert names.get("tl.vmi.vmin", 0) == 1, f"FP8 Min must use the direct instruction, got {names}"
+
+
+@pytest.mark.pto
+def test_fp8_minmax_takes_the_select_form_when_relaxed_is_off():
+    """With `tl.pto.relaxed_minmax=False` even an FP8 Min uses the Select form."""
+    stages, error = _lower_capture(
         _k_minmax_fp8(),
-        expect_error=True,
-        pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
+        pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: False},
     )
-    assert error is not None, "FP8 Min/Max must be rejected"
-    message = str(error)
-    assert "has no PTO Parallel lowering" in message, f"expected the dtype gate, got: {message}"
+    assert error is None, f"the Select form must lower, got: {error}"
+    assert not _max_min_nodes(stages["legalize"]), "the strict form must rewrite Min"
+    names = _vmi_call_names(stages["vectorize"])
+    assert "tl.vmi.vmin" not in names, f"the strict form must not use the direct instruction, got {names}"
 
 
 @pytest.mark.pto

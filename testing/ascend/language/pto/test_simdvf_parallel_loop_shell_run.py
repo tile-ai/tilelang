@@ -58,30 +58,14 @@ def _dev():
     return torch.device("npu")
 
 
-@contextlib.contextmanager
-def _without_data_race_check():
-    """Scope the race-check override to kernel compilation, then restore it.
-
-    Setting it at import time would leak into the whole pytest process (and
-    overwrite a caller's explicit value) even when every test is skipped.
-    """
-    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
-    saved = os.environ.get(key)
-    os.environ[key] = "1"
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = saved
-
-
 @lru_cache(maxsize=None)
 def _compile_builder(builder):
     """Compile each builder once: a device compile dominates the test cost."""
-    with _without_data_race_check():
-        return tilelang.compile(builder(), target="pto")
+    return tilelang.compile(
+        builder(),
+        target="pto",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True},
+    )
 
 
 def _build_runtime_shells():

@@ -97,35 +97,18 @@ def _ref(a, b, op):
 _KERNELS = {}
 
 
-@contextlib.contextmanager
-def _without_data_race_check():
-    """Scope the race-check override to kernel compilation, then restore it.
-
-    Setting it at import time would leak into the whole pytest process (and
-    overwrite a caller's explicit value) even when every test is skipped.
-    """
-    key = "TILELANG_DISABLE_DATA_RACE_CHECK"
-    saved = os.environ.get(key)
-    os.environ[key] = "1"
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = saved
-
-
 def _kernel(relaxed):
     """Compile one kernel per configuration: a device compile dominates cost."""
     if relaxed not in _KERNELS:
-        with _without_data_race_check():
-            _KERNELS[relaxed] = tilelang.compile(
-                _build(),
-                target="pto",
-                out_idx=-1,
-                pass_configs={tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed},
-            )
+        _KERNELS[relaxed] = tilelang.compile(
+            _build(),
+            target="pto",
+            out_idx=-1,
+            pass_configs={
+                tilelang.PassConfigKey.TL_PTO_RELAXED_MINMAX: relaxed,
+                tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            },
+        )
     return _KERNELS[relaxed]
 
 

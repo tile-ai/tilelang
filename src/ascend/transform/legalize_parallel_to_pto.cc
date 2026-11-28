@@ -355,9 +355,16 @@ public:
   Stmt VisitStmt_(const BindNode *op) final {
     Stmt result = StmtExprMutator::VisitStmt_(op);
     if (const auto *bind = result.as<BindNode>()) {
-      if (!bind->value.dtype().is_handle() &&
-          pto::IsSafelyReevaluableValue(bind->value)) {
-        outer_binds_.Set(bind->var, bind->value);
+      if (!bind->value.dtype().is_handle()) {
+        // The guard-dependency analysis only reads which symbols a condition
+        // depends on, so every scalar Bind is recorded here -- including a
+        // value that may not be re-evaluated (a snapshot of memory): the
+        // dependency set is a superset either way, which keeps the verdict
+        // conservative.
+        guard_bind_env_.Set(bind->var, bind->value);
+        if (pto::IsSafelyReevaluableValue(bind->value)) {
+          outer_binds_.Set(bind->var, bind->value);
+        }
       }
     }
     return result;
@@ -473,6 +480,29 @@ public:
                                   std::to_string(bound->max_value) + "]";
           return true;
         }
+        // The upper end cannot be compared with a symbolic extent. That is the
+        // caller's contract when the extent is independent of the folded
+        // condition -- but `if i < n: y[i] = 1` on `(n,)` uses the same `n`:
+        // the fold stores every lane of the unit, so `n == 64` with 128 lanes
+        // leaves the buffer even though the source never did. Accept only when
+        // the extent provably covers the whole index range.
+        const PrimExpr extent = buffer->shape[axis];
+        if (predicate_analyzer_.CanProve(
+                extent > make_const(extent.dtype(), bound->max_value))) {
+          continue;
+        }
+        for (const VarNode *symbol : ConditionSymbols(buffer->shape[axis])) {
+          if (constrained.count(symbol) == 0) {
+            continue;
+          }
+          out_of_bounds_detail_ =
+              "buffer `" + std::string(buffer->name) + "` axis " +
+              std::to_string(axis) + " has symbolic extent `" +
+              symbol->name_hint +
+              "` that the folded condition is the only bound of; folding "
+              "would store every lane of the unit";
+          return true;
+        }
         continue;
       }
       if (bound->min_value < 0 || bound->max_value >= dim->value) {
@@ -529,11 +559,28 @@ public:
   // candidate reason for the access to fit.
   std::set<const VarNode *> ConditionSymbols(const PrimExpr &condition) {
     std::set<const VarNode *> symbols;
-    PostOrderVisit(condition, [&](const ObjectRef &node) {
-      if (const auto *var = node.as<VarNode>()) {
+    std::set<const VarNode *> expanded;
+    std::function<void(const PrimExpr &)> collect = [&](const PrimExpr &expr) {
+      PostOrderVisit(expr, [&](const ObjectRef &node) {
+        const auto *var = node.as<VarNode>();
+        if (var == nullptr) {
+          return;
+        }
         symbols.insert(var);
-      }
-    });
+        if (!expanded.insert(var).second) {
+          return;
+        }
+        // `if flag` must inherit the dependencies of `flag`'s definition: the
+        // guard is what bounds the access even when the condition only names a
+        // Bool Bind. A Var with no recorded definition is a kernel parameter or
+        // a loop coordinate, which carries no memory dependency.
+        auto it = guard_bind_env_.find(GetRef<Var>(var));
+        if (it != guard_bind_env_.end()) {
+          collect((*it).second);
+        }
+      });
+    };
+    collect(condition);
     return symbols;
   }
 
@@ -596,9 +643,9 @@ public:
   // Min/Max stay nodes when the direct VMI instruction is usable: integers
   // always (integer comparison has no NaN or signed-zero ambiguity), floating
   // point only under `tl.pto.relaxed_minmax`, whose default accepts the
-  // instruction's NaN and signed-zero semantics. The instruction covers only
-  // 8/16/32-bit integers and f16/bf16/f32, so FP8 and wider floats keep the
-  // comparison plus Select form.
+  // instruction's NaN and signed-zero semantics. The supported set is the VMI
+  // element set for the instruction: 8/16/32-bit integers, f16/bf16/f32 and
+  // FP8; wider floats keep the comparison plus Select form.
   bool KeepMinMaxNode(const DataType &dtype) const {
     if (!pto::IsSupportedVectorBinaryOp("vmin", dtype)) {
       return false;
@@ -1095,6 +1142,9 @@ public:
   // Facts that stay valid around a converting region: enclosing loop ranges and
   // safely re-evaluable scalar Binds defined outside it.
   Map<Var, PrimExpr> outer_binds_;
+  // Scalar `Bind` definitions seen by the fold, used to expand a condition that
+  // is just a Var into the symbols its definition depends on.
+  Map<Var, PrimExpr> guard_bind_env_;
   std::vector<std::pair<Var, Range>> outer_ranges_;
 };
 
